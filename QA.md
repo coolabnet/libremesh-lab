@@ -5,6 +5,7 @@ This runbook is written for an AI agent testing LibreMesh Lab end to end. Start 
 ## Ground Rules
 
 - Do not commit generated files from `run/`, `logs/`, `exports/`, `images/`, `src/`, or local install smoke-test directories.
+- `PROGRESS.md` is an ignored local status file. Keep it out of commits and treat it like runtime notes, not repository documentation.
 - Record command output, exit codes, host OS, kernel, available RAM/CPU, and whether KVM is available.
 - If a privileged command fails, capture the exact error and stop that phase before trying cleanup.
 - Before destructive lifecycle tests, verify no unrelated process is using the configured bridge, TAP prefix, or QEMU PID files.
@@ -18,6 +19,8 @@ command -v bash git curl python3 ssh
 command -v shellcheck || true
 command -v qemu-system-x86_64 || true
 command -v ip || true
+command -v iw || true
+command -v wmediumd || true
 command -v dnsmasq || true
 ```
 
@@ -26,12 +29,13 @@ Expected:
 - Only intentional local files are modified or ignored.
 - `bash`, `git`, `curl`, `python3`, and `ssh` are present for basic QA.
 - QEMU, `ip`, and `dnsmasq` are present before VM-backed phases.
+- `iw`, `wmediumd`, `modprobe`, and namespace tooling are recorded for namespace-track readiness.
 
 ## 2. Static Checks
 
 ```bash
 bash -n scripts/install.sh bin/libremesh-lab scripts/qemu/*.sh scripts/qemu/lib/*.sh tests/qemu/*.sh
-shellcheck -x -P tests/qemu scripts/install.sh bin/libremesh-lab scripts/qemu/run-testbed-adapter.sh tests/qemu/run-all.sh tests/qemu/test-fast-cli.sh tests/qemu/test-run-adapter-wrapper.sh
+shellcheck -x -P tests/qemu scripts/install.sh bin/libremesh-lab scripts/qemu/run-testbed-adapter.sh scripts/qemu/preflight-namespace.sh tests/qemu/run-all.sh tests/qemu/test-fast-cli.sh tests/qemu/test-run-adapter-wrapper.sh tests/qemu/test-namespace-preflight.sh
 git diff --check
 ```
 
@@ -146,8 +150,7 @@ Expected:
 Run on a host with root privileges, TAP/bridge support, and enough RAM:
 
 ```bash
-sudo bash scripts/qemu/start-vwifi.sh
-sudo bash scripts/qemu/start-mesh.sh
+sudo bin/libremesh-lab start
 sleep 90
 bin/libremesh-lab configure
 bin/libremesh-lab status | python3 -m json.tool
@@ -171,6 +174,7 @@ bin/libremesh-lab test --suite lab
 Expected:
 
 - Mesh protocol and rollback checks pass, or failures include enough logs to diagnose VM boot, SSH, BMX7, or routing problems.
+- The suite is not run with `sudo`; only the earlier start/stop operations need host networking privileges.
 
 With a Mesha checkout:
 
@@ -181,6 +185,28 @@ MESHA_ROOT=/path/to/mesha bin/libremesh-lab test --suite adapter
 Expected:
 
 - Adapter contract, topology manipulation, firmware upgrade, multi-hop, validation, config drift, rollout, maintenance, readonly, and failure-path checks either pass or fail with actionable lab logs.
+- Adapter-generated files stay inside the lab wrapper workspace or explicit lab output paths unless the adapter intentionally targets another path.
+
+Full VM-backed verification is complete only after this path has run:
+
+```bash
+bin/libremesh-lab build-image
+sudo bin/libremesh-lab start
+sleep 90
+bin/libremesh-lab configure
+bin/libremesh-lab status | python3 -m json.tool
+bin/libremesh-lab test --suite lab
+MESHA_ROOT=/path/to/mesha bin/libremesh-lab test --suite adapter
+bin/libremesh-lab logs
+sudo bin/libremesh-lab stop
+bin/libremesh-lab status | python3 -m json.tool
+```
+
+Expected:
+
+- The firmware image exists under `images/`.
+- `status` shows the expected VM inventory before tests and clean stopped state after cleanup.
+- Logs under `run/logs/` are available for any failure.
 
 ## 9. Logs And Cleanup
 
@@ -212,7 +238,19 @@ Expected:
 
 ## 11. Namespace Track
 
-The namespace suite is a placeholder until namespace/wmediumd tests exist:
+The namespace suite is a placeholder until namespace/wmediumd tests exist. First
+run the safe, non-mutating host preflight:
+
+```bash
+bash scripts/qemu/preflight-namespace.sh
+```
+
+Expected:
+
+- The preflight checks `ip`, `iw`, `wmediumd`, `modprobe`, namespace tooling, and `mac80211_hwsim` availability without requiring root or mutating host state.
+- Missing `mac80211_hwsim` or `wmediumd` is recorded as a namespace-track blocker, not a fast/lab/adapter suite blocker.
+
+Then record current suite behavior:
 
 ```bash
 bin/libremesh-lab test --suite namespace
@@ -221,8 +259,8 @@ RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite namespace
 
 Expected:
 
-- Without `RUN_NAMESPACE_TESTS=1`, the suite reports a skip-like message and exits zero.
-- With `RUN_NAMESPACE_TESTS=1`, it exits nonzero until real namespace tests are implemented.
+- Without `RUN_NAMESPACE_TESTS=1`, the suite reports preflight, then a skip-like message, and exits zero.
+- With `RUN_NAMESPACE_TESTS=1`, it reports preflight first, then exits nonzero until real namespace tests are implemented.
 
 ## 12. Final Report
 

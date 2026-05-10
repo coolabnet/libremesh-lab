@@ -42,20 +42,34 @@ This clones the repo to `~/.local/share/libremesh-lab` and symlinks the CLI to `
 # 1. Build or download a LibreMesh firmware image
 libremesh-lab build-image
 
-# 2. Start the virtual mesh network (requires sudo for TAP/bridge)
+# 2. Start the virtual mesh network (requires root for bridge/TAP/dnsmasq/QEMU networking)
 sudo libremesh-lab start
 
 # 3. Wait ~90s for boot, then configure VMs
 libremesh-lab configure
 
-# 4. Run the full test suite
-libremesh-lab test
+# 4. Run safe VM-free checks
+libremesh-lab test --suite fast
 
 # 5. Check status
 libremesh-lab status
 
-# 6. Tear down when done
+# 6. Tear down VM networking when done
 sudo libremesh-lab stop
+```
+
+For full VM-backed verification, keep the lab running after `configure`, then run
+the `lab` suite and, when a Mesha checkout is available, the `adapter` suite:
+
+```bash
+libremesh-lab test --suite lab
+MESHA_ROOT=/path/to/mesha libremesh-lab test --suite adapter
+```
+
+Destructive start/stop lifecycle coverage is opt-in:
+
+```bash
+RUN_LIFECYCLE_TESTS=1 libremesh-lab test --suite lifecycle
 ```
 
 ## Architecture
@@ -102,7 +116,7 @@ Commands:
   stop                     Stop VMs and clean networking state
   status                   Print lab status as JSON
   logs                     Collect lab logs
-  test [--suite fast]      Run lab tests
+  test [--suite fast]      Run lab tests; default suite is fast
   run-adapter <script>     Run an external adapter against lab config
 ```
 
@@ -118,7 +132,49 @@ LibreMesh Lab ships with three pre-configured topologies in `config/`:
 
 Switch topologies by pointing `start` to the desired config.
 
-## Test Suite
+## Test Suites
+
+`libremesh-lab test` defaults to the VM-free `fast` suite. Select broader
+coverage explicitly:
+
+| Suite | Requires VMs? | Requires Mesha? | Root requirement | Purpose |
+|-------|---------------|-----------------|------------------|---------|
+| `fast` | No | No | No | CLI contract, adapter-wrapper isolation, and namespace preflight checks |
+| `lab` | Yes, already running and configured | No | Root only for prior `start`/later `stop` | Mesh protocol and rollback checks |
+| `adapter` | Yes, already running and configured | Yes, `MESHA_ROOT=/path/to/mesha` | Root only for prior `start`/later `stop` | Mesha adapter, rollout, drift, validation, and failure-path coverage |
+| `lifecycle` | It starts/stops the lab | Optional for topology checks | Yes; set `RUN_LIFECYCLE_TESTS=1` | Destructive lifecycle and cleanup coverage |
+| `namespace` | Future track | No | Future namespace privileges | Placeholder for host namespace/wmediumd tests |
+
+Run the default safe suite:
+
+```bash
+libremesh-lab test
+libremesh-lab test --suite fast
+```
+
+Run VM-backed suites after `sudo libremesh-lab start` and `libremesh-lab configure`:
+
+```bash
+libremesh-lab test --suite lab
+MESHA_ROOT=/path/to/mesha libremesh-lab test --suite adapter
+```
+
+The namespace suite is not implemented yet, but it runs the safe host preflight
+first:
+
+```bash
+bash scripts/qemu/preflight-namespace.sh
+libremesh-lab test --suite namespace
+```
+
+The preflight checks for tools and kernel support such as `ip`, `iw`, `wmediumd`,
+`modprobe`, `unshare` or `ip netns`, and `mac80211_hwsim` availability without
+creating namespaces, loading modules, or requiring root. Without
+`RUN_NAMESPACE_TESTS=1`, `--suite namespace` reports the preflight result, prints
+a skip-style message, and exits zero; with the variable set it exits nonzero
+until real namespace tests land.
+
+### Test files
 
 | Test | What it covers |
 |------|----------------|
@@ -132,16 +188,19 @@ Switch topologies by pointing `start` to the desired config.
 | `test-rollback.sh` | Configuration rollback flows |
 | `test-rollout.sh` | Rolling configuration updates |
 | `test-failure-paths.sh` | Error handling and failure scenarios |
+| `test-run-adapter-wrapper.sh` | No-VM adapter workspace isolation regression |
+| `test-namespace-preflight.sh` | No-root namespace/wmediumd preflight regression |
 
-Run all tests:
+Run the safe suite:
 
 ```bash
-libremesh-lab test
+libremesh-lab test --suite fast
 # Or directly:
-bash tests/qemu/run-all.sh
+bash tests/qemu/run-all.sh --suite fast
 ```
 
-Lifecycle tests are gated behind `RUN_LIFECYCLE_TESTS=1`. Convergence-sensitive tests accept `CONVERGE_WAIT` and `QEMU_TIMEOUT_MULTIPLIER` env vars.
+Lifecycle tests are gated behind `RUN_LIFECYCLE_TESTS=1`. Convergence-sensitive
+tests accept `CONVERGE_WAIT` and `QEMU_TIMEOUT_MULTIPLIER` env vars.
 
 ## Mesha Integration
 
@@ -155,6 +214,16 @@ LibreMesh Lab is designed to work as a test backend for [Mesha](https://github.c
 
 The lab provides inventories, desired state, SSH configuration, keys, and hostname aliases — no changes needed in the caller repository.
 
+`run-adapter` executes the adapter from a temporary workspace. It exposes lab
+paths through `LIBREMESH_LAB_ROOT`, `LIBREMESH_LAB_CONFIG`,
+`LIBREMESH_LAB_INVENTORIES`, `LIBREMESH_LAB_DESIRED_STATE`, `REPO_ROOT`,
+`WORKSPACE_ROOT`, `SSH_CONFIG_PATH`, `SSH_KEY`, and `GIT_SSH_COMMAND`, with an
+isolated `HOME`. Lab inventories, desired state, topology, and SSH config are
+mapped into the workspace, while adapter repository entries are copied in with
+selected generated top-level directories excluded and VCS metadata removed. This
+lets scripts that assume repository-relative paths run without writing back into
+the caller repo.
+
 ## Requirements
 
 | Resource | Minimum | Recommended |
@@ -163,7 +232,7 @@ The lab provides inventories, desired state, SSH configuration, keys, and hostna
 | **CPU** | 2 cores (TCG) | 4+ cores (KVM) |
 | **Disk** | 2 GB | 5 GB |
 | **OS** | Linux | Linux with KVM |
-| **Permissions** | sudo / CAP_NET_ADMIN | root |
+| **Permissions** | sudo / CAP_NET_ADMIN for VM networking | root on isolated QA hosts |
 
 ### Software dependencies
 
@@ -172,6 +241,13 @@ The lab provides inventories, desired state, SSH configuration, keys, and hostna
 - **git**, **curl** — installation and image download
 - **bridge-utils**, **iproute2** — networking (`ip`, `brctl`)
 - **dnsmasq** — DHCP for VM management network
+
+Root is required for commands that create or remove host networking state:
+`start`, `stop`, direct `scripts/qemu/start-vwifi.sh`,
+`scripts/qemu/start-mesh.sh`, `scripts/qemu/stop-mesh.sh`, and some image
+preparation flows that mount loopback filesystems. `status`, `logs`,
+`configure`, `test --suite fast`, and `run-adapter` normally run unprivileged
+after the lab exists.
 
 ## Project Structure
 
