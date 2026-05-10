@@ -24,6 +24,11 @@ USAGE
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --suite)
+            if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                echo "ERROR: --suite requires one of: fast, lab, adapter, lifecycle, namespace" >&2
+                usage >&2
+                exit 1
+            fi
             SUITE="${2:-}"
             shift 2
             ;;

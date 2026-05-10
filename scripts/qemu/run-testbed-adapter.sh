@@ -22,6 +22,11 @@ fi
 
 ADAPTER_SCRIPT="$(cd "$(dirname "${ADAPTER_SCRIPT}")" && pwd)/$(basename "${ADAPTER_SCRIPT}")"
 ADAPTER_ROOT="$(git -C "$(dirname "${ADAPTER_SCRIPT}")" rev-parse --show-toplevel 2>/dev/null || true)"
+SYSTEM_SSH="$(command -v ssh || true)"
+if [ -z "${SYSTEM_SSH}" ]; then
+  echo "ERROR: ssh is required to run adapter scripts." >&2
+  exit 1
+fi
 
 SSH_KEY="${SSH_KEY:-${RUN_DIR}/ssh-keys/id_rsa}"
 SSH_CONFIG_TEMPLATE="${LAB_CONFIG}/ssh-config"
@@ -58,18 +63,18 @@ if [ -n "${ADAPTER_ROOT}" ] && [ -d "${ADAPTER_ROOT}" ]; then
 
   case "${ADAPTER_SCRIPT}" in
     "${ADAPTER_ROOT}"/*)
-      REL_PATH="${ADAPTER_SCRIPT#${ADAPTER_ROOT}/}"
+      REL_PATH="${ADAPTER_SCRIPT#"${ADAPTER_ROOT}"/}"
       EXEC_SCRIPT="${TMP_WORKSPACE}/${REL_PATH}"
       ;;
   esac
 fi
 
-cat > "${SSH_WRAPPER_DIR}/ssh" <<'WRAPPER'
+cat > "${SSH_WRAPPER_DIR}/ssh" <<WRAPPER
 #!/usr/bin/env bash
-if [ -n "${SSH_CONFIG_PATH:-}" ] && [ -f "${SSH_CONFIG_PATH}" ]; then
-  exec /usr/bin/ssh -F "${SSH_CONFIG_PATH}" "$@"
+if [ -n "\${SSH_CONFIG_PATH:-}" ] && [ -f "\${SSH_CONFIG_PATH}" ]; then
+  exec "${SYSTEM_SSH}" -F "\${SSH_CONFIG_PATH}" "\$@"
 fi
-exec /usr/bin/ssh "$@"
+exec "${SYSTEM_SSH}" "\$@"
 WRAPPER
 chmod +x "${SSH_WRAPPER_DIR}/ssh"
 

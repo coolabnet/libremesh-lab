@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 echo "# Fast CLI Tests"
-tap_plan 4
+tap_plan 5
 
 STATUS_OUTPUT=""
 STATUS_EXIT=0
@@ -65,6 +65,15 @@ else
     else
         fail "test_stop_clean_path_exits_zero" "stop exited ${STOP_EXIT}"
     fi
+fi
+
+SUITE_ERROR_OUTPUT=""
+SUITE_ERROR_EXIT=0
+SUITE_ERROR_OUTPUT="$("${LAB_CLI}" test --suite 2>&1)" || SUITE_ERROR_EXIT=$?
+if [ "${SUITE_ERROR_EXIT}" -ne 0 ] && echo "${SUITE_ERROR_OUTPUT}" | grep -q -- "--suite requires"; then
+    pass "test_missing_suite_argument_reports_error"
+else
+    fail "test_missing_suite_argument_reports_error" "exit=${SUITE_ERROR_EXIT}; output=${SUITE_ERROR_OUTPUT}"
 fi
 
 tap_summary
