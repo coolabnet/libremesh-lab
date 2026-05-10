@@ -246,4 +246,4 @@ LibreMesh Lab is free software. See [LICENSE](LICENSE) for details.
 - **LibreMesh**: [https://libremesh.org](https://libremesh.org)
 - **OpenWrt**: [https://openwrt.org](https://openwrt.org)
 - **Mesha**: [https://github.com/coolabnet/mesha](https://github.com/coolabnet/mesha)
-- **Cooolab**: [https://coolab.net](https://coolab.net)
+- **Cooolab**: [https://coolab.org](https://coolab.org)
