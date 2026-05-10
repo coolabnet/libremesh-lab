@@ -26,6 +26,9 @@ bin/vwifi-*
 .env.*
 !.env.example
 
+# Local/project notes
+PROGRESS.md
+
 # OS/editor/cache noise
 .DS_Store
 Thumbs.db

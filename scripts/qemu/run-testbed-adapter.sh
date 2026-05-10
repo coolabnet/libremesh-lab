@@ -36,6 +36,7 @@ fi
 
 TMP_WORKSPACE="$(mktemp -d /tmp/libremesh-lab-adapter.XXXXXX)"
 SSH_WRAPPER_DIR="$(mktemp -d /tmp/libremesh-lab-ssh-wrapper.XXXXXX)"
+TMP_HOME="${TMP_WORKSPACE}/home"
 
 cleanup() {
   rm -rf "${TMP_WORKSPACE}" "${SSH_WRAPPER_DIR}"
@@ -45,7 +46,7 @@ trap cleanup EXIT
 
 ln -s "${LAB_CONFIG}/inventories" "${TMP_WORKSPACE}/inventories"
 ln -s "${LAB_CONFIG}/desired-state" "${TMP_WORKSPACE}/desired-state"
-mkdir -p "${TMP_WORKSPACE}/exports" "${TMP_WORKSPACE}/logs"
+mkdir -p "${TMP_WORKSPACE}/exports" "${TMP_WORKSPACE}/logs" "${TMP_HOME}"
 
 EXEC_SCRIPT="${ADAPTER_SCRIPT}"
 if [ -n "${ADAPTER_ROOT}" ] && [ -d "${ADAPTER_ROOT}" ]; then
@@ -83,10 +84,12 @@ export LIBREMESH_LAB_INVENTORIES="${LAB_CONFIG}/inventories"
 export LIBREMESH_LAB_DESIRED_STATE="${LAB_CONFIG}/desired-state"
 export REPO_ROOT="${TMP_WORKSPACE}"
 export WORKSPACE_ROOT="${TMP_WORKSPACE}"
+export HOME="${TMP_HOME}"
 export SOURCE_WORKSPACE_ROOT="${ADAPTER_ROOT:-}"
 export SSH_CONFIG_PATH="${SSH_CONFIG}"
 export SSH_KEY="${SSH_KEY}"
 export GIT_SSH_COMMAND="ssh -F ${SSH_CONFIG}"
 export PATH="${SSH_WRAPPER_DIR}:${PATH}"
 
+cd "${TMP_WORKSPACE}"
 "${EXEC_SCRIPT}" "${ADAPTER_ARGS[@]}"

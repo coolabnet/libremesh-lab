@@ -8,36 +8,36 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${REPO_ROOT}/run"
 LOCK_DIR="${RUN_DIR}/testbed.lock"
 TOPOLOGY_FILE="${REPO_ROOT}/config/topology.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Defaults
-BRIDGE_NAME="mesha-br0"
-TAP_PREFIX="mesha-tap"
-NODE_COUNT=4
+source "${SCRIPT_DIR}/lib/topology.sh"
+lab_topology_load "${TOPOLOGY_FILE}"
 
 echo "=========================================="
 echo " LibreMesh Lab Teardown"
 echo "=========================================="
 
-# Parse topology for bridge/tap names
-if [ -f "$TOPOLOGY_FILE" ]; then
-    _bn=$(grep 'bridge_name:' "$TOPOLOGY_FILE" | head -1 | awk '{print $2}' | tr -d '"')
-    _tp=$(grep 'tap_prefix:' "$TOPOLOGY_FILE" | head -1 | awk '{print $2}' | tr -d '"')
-    [ -n "$_bn" ] && BRIDGE_NAME="$_bn"
-    [ -n "$_tp" ] && TAP_PREFIX="$_tp"
-fi
-
 cleaned_something=0
+have_ip=0
+if command -v ip >/dev/null 2>&1; then
+    have_ip=1
+fi
 
 # ─── Kill processes from PID files ───
 echo ""
 echo "--- Stopping processes ---"
 
-for pid_file in "${RUN_DIR}"/*.pid; do
+for pid_file in "${RUN_DIR}"/node-*.pid "${RUN_DIR}/vwifi-server.pid" "${RUN_DIR}/dnsmasq-dhcp.pid"; do
     [ -f "$pid_file" ] || continue
-    pid=$(cat "$pid_file" 2>/dev/null)
+    pid=$(cat "$pid_file" 2>/dev/null || true)
     # Skip empty or invalid PID files
-    [ -z "$pid" ] && { echo "  [$(basename "$pid_file" .pid)] Empty PID file, removing"; rm -f "$pid_file"; continue; }
     label=$(basename "$pid_file" .pid)
+    if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+        echo "  [${label}] Empty or invalid PID file, removing"
+        rm -f "$pid_file"
+        cleaned_something=1
+        continue
+    fi
 
     if kill -0 "$pid" 2>/dev/null; then
         echo "  [${label}] Sending SIGTERM to PID ${pid}..."
@@ -71,12 +71,14 @@ echo "--- Cleaning up TAP devices ---"
 
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     tap="${TAP_PREFIX}${i}"
-    if ip link show "$tap" &>/dev/null; then
+    if [ "$have_ip" -eq 1 ] && ip link show "$tap" &>/dev/null; then
         echo "  Removing ${tap}..."
         ip link set "$tap" down 2>/dev/null || true
         ip link set "$tap" nomaster 2>/dev/null || true
         ip tuntap del dev "$tap" mode tap 2>/dev/null || true
         cleaned_something=1
+    elif [ "$have_ip" -eq 0 ]; then
+        echo "  ip command not found; skipping ${tap}."
     else
         echo "  ${tap} not found (already cleaned)."
     fi
@@ -86,11 +88,13 @@ done
 echo ""
 echo "--- Cleaning up bridge ---"
 
-if ip link show "${BRIDGE_NAME}" &>/dev/null; then
+if [ "$have_ip" -eq 1 ] && ip link show "${BRIDGE_NAME}" &>/dev/null; then
     echo "  Removing bridge ${BRIDGE_NAME}..."
     ip link set "${BRIDGE_NAME}" down 2>/dev/null || true
     ip link del "${BRIDGE_NAME}" 2>/dev/null || true
     cleaned_something=1
+elif [ "$have_ip" -eq 0 ]; then
+    echo "  ip command not found; skipping bridge cleanup."
 else
     echo "  Bridge ${BRIDGE_NAME} not found (already cleaned)."
 fi

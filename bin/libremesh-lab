@@ -15,7 +15,7 @@ Commands:
   stop                     Stop VMs and clean lab networking/runtime state
   status                   Print lab status as JSON
   logs                     Collect lab logs
-  test                     Run lab QEMU tests
+  test [--suite fast]      Run lab tests; default suite is fast
   run-adapter <script>     Run an external adapter against lab config
 USAGE
 }

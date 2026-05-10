@@ -5,6 +5,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOG_DIR="${REPO_ROOT}/run/logs"
 SSH_CONFIG="${REPO_ROOT}/config/ssh-config.resolved"
+TOPOLOGY_FILE="${REPO_ROOT}/config/topology.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+source "${SCRIPT_DIR}/lib/topology.sh"
+lab_topology_load "${TOPOLOGY_FILE}"
 
 mkdir -p "${LOG_DIR}"
 
@@ -16,16 +21,25 @@ echo "  Serial logs: $(ls "${LOG_DIR}"/node-*.serial.log 2>/dev/null | wc -l) fi
 # Collect host networking state
 {
     echo "=== Bridge ==="
-    ip link show mesha-br0 2>/dev/null || echo "bridge not found"
+    if command -v ip >/dev/null 2>&1; then
+        ip link show "${BRIDGE_NAME}" 2>/dev/null || echo "bridge not found"
+    else
+        echo "ip command not found"
+    fi
     echo "=== TAP devices ==="
-    for i in 0 1 2 3; do
-        ip link show "mesha-tap${i}" 2>/dev/null || echo "mesha-tap${i} not found"
+    for i in $(seq 0 $((NODE_COUNT - 1))); do
+        tap="${TAP_PREFIX}${i}"
+        if command -v ip >/dev/null 2>&1; then
+            ip link show "${tap}" 2>/dev/null || echo "${tap} not found"
+        else
+            echo "${tap}: ip command not found"
+        fi
     done
 } > "${LOG_DIR}/host-network.log" 2>&1
 
 # Collect vwifi-server log
 if [ -f "${REPO_ROOT}/run/vwifi-server.pid" ]; then
-    VWIFI_PID=$(cat "${REPO_ROOT}/run/vwifi-server.pid")
+    VWIFI_PID=$(cat "${REPO_ROOT}/run/vwifi-server.pid" 2>/dev/null || true)
     echo "vwifi-server PID: ${VWIFI_PID} ($(kill -0 "${VWIFI_PID}" 2>/dev/null && echo 'running' || echo 'stopped'))" \
         > "${LOG_DIR}/vwifi-server.log"
 fi
@@ -35,7 +49,7 @@ if [ ! -f "${SSH_CONFIG}" ]; then
     echo "WARN: SSH config not found at ${SSH_CONFIG} — skipping VM log collection"
     echo "  Run configure-vms.sh first to generate the SSH config"
 else
-    for entry in lm-testbed-node-1 lm-testbed-node-2 lm-testbed-node-3 lm-testbed-tester; do
+    for entry in "${NODE_HOSTNAMES[@]}"; do
         {
             echo "=== ${entry}: dmesg ==="
             ssh -F "${SSH_CONFIG}" -o ConnectTimeout=5 -o BatchMode=yes "root@${entry}" "dmesg" 2>&1 || echo "unreachable"

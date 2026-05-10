@@ -4,7 +4,7 @@
 
 LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REPO_ROOT="${LAB_ROOT}"
-MESHA_ROOT="${MESHA_ROOT:-$(cd "${LAB_ROOT}/../mesha" 2>/dev/null && pwd || true)}"
+MESHA_ROOT="${MESHA_ROOT:-}"
 LAB_CLI="${LAB_ROOT}/bin/libremesh-lab"
 SSH_CONFIG="${LAB_ROOT}/config/ssh-config.resolved"
 if [ ! -f "${SSH_CONFIG}" ]; then
@@ -43,6 +43,17 @@ fail() {
 skip() {
     TEST_COUNT=$((TEST_COUNT + 1))
     echo "ok ${TEST_COUNT} - $1 # SKIP ${2:-}"
+}
+
+require_mesha_root() {
+    if [ -z "${MESHA_ROOT}" ]; then
+        echo "Bail out! MESHA_ROOT is required for this suite; set MESHA_ROOT=/path/to/mesha" >&2
+        exit 1
+    fi
+    if [ ! -d "${MESHA_ROOT}" ]; then
+        echo "Bail out! MESHA_ROOT does not exist: ${MESHA_ROOT}" >&2
+        exit 1
+    fi
 }
 
 # SSH helper — run command on VM

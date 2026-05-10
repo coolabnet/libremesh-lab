@@ -7,21 +7,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${REPO_ROOT}/run"
 TOPOLOGY_FILE="${REPO_ROOT}/config/topology.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Defaults
-BRIDGE_NAME="mesha-br0"
-BRIDGE_IP="10.99.0.254/16"
-TAP_PREFIX="mesha-tap"
-
-# Parse topology for bridge/tap settings
-if [ -f "$TOPOLOGY_FILE" ]; then
-    _bn=$(grep 'bridge_name:' "$TOPOLOGY_FILE" | head -1 | awk '{print $2}' | tr -d '"')
-    _bi=$(grep 'bridge_ip:' "$TOPOLOGY_FILE" | head -1 | awk '{print $2}' | tr -d '"')
-    _tp=$(grep 'tap_prefix:' "$TOPOLOGY_FILE" | head -1 | awk '{print $2}' | tr -d '"')
-    [ -n "$_bn" ] && BRIDGE_NAME="$_bn"
-    [ -n "$_bi" ] && BRIDGE_IP="${_bi}/16"
-    [ -n "$_tp" ] && TAP_PREFIX="$_tp"
-fi
+source "${SCRIPT_DIR}/lib/topology.sh"
+lab_topology_load "${TOPOLOGY_FILE}"
 
 # ─── Helper: check if SSH is reachable ───
 check_ssh() {
@@ -32,30 +21,6 @@ check_ssh() {
         -o ConnectTimeout=3 \
         "root@${ip}" "echo ok" &>/dev/null
 }
-
-# ─── Gather VM status ───
-# Node definitions: read from topology or use defaults
-declare -a NODE_IPS=()
-declare -a NODE_HOSTNAMES=()
-NODE_COUNT=0
-
-if [ -f "$TOPOLOGY_FILE" ]; then
-    # Extract hostname/ip pairs from YAML node entries
-    while IFS= read -r hostname; do
-        NODE_HOSTNAMES+=("$hostname")
-    done < <(grep 'hostname:' "$TOPOLOGY_FILE" | grep -v 'tap_prefix\|thisnode' | awk -F': ' '{print $2}' | tr -d '"')
-    while IFS= read -r ip; do
-        NODE_IPS+=("$ip")
-    done < <(grep 'ip:' "$TOPOLOGY_FILE" | grep -v 'bridge_ip\|server_ip\|management' | awk -F': ' '{print $2}' | tr -d '"')
-    NODE_COUNT=${#NODE_HOSTNAMES[@]}
-fi
-
-# Fallback defaults
-if [ "$NODE_COUNT" -eq 0 ]; then
-    NODE_HOSTNAMES=("lm-testbed-node-1" "lm-testbed-node-2" "lm-testbed-node-3" "lm-testbed-tester")
-    NODE_IPS=("10.99.0.11" "10.99.0.12" "10.99.0.13" "10.99.0.14")
-    NODE_COUNT=4
-fi
 
 # Build VM JSON entries
 vm_json_entries=""
@@ -69,8 +34,8 @@ for ((i = 0; i < NODE_COUNT; i++)); do
     ssh_ok=false
 
     if [ -f "$pid_file" ]; then
-        pid=$(cat "$pid_file")
-        if kill -0 "$pid" 2>/dev/null; then
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
             running=true
             if check_ssh "$ip"; then
                 ssh_ok=true
@@ -92,15 +57,17 @@ vwifi_running=false
 vwifi_pid=0
 vwifi_pid_file="${RUN_DIR}/vwifi-server.pid"
 if [ -f "$vwifi_pid_file" ]; then
-    vwifi_pid=$(cat "$vwifi_pid_file")
-    if kill -0 "$vwifi_pid" 2>/dev/null; then
+    vwifi_pid=$(cat "$vwifi_pid_file" 2>/dev/null || true)
+    if [[ "$vwifi_pid" =~ ^[0-9]+$ ]] && kill -0 "$vwifi_pid" 2>/dev/null; then
         vwifi_running=true
+    else
+        vwifi_pid=0
     fi
 fi
 
 # ─── Bridge status ───
 bridge_exists=false
-if ip link show "${BRIDGE_NAME}" &>/dev/null; then
+if command -v ip >/dev/null 2>&1 && ip link show "${BRIDGE_NAME}" &>/dev/null; then
     bridge_exists=true
 fi
 
@@ -124,7 +91,7 @@ cat <<EOF
   "vms": [${vm_json_entries}
   ],
   "vwifi_server": {"running": ${vwifi_running}, "pid": ${vwifi_pid}},
-  "bridge": {"exists": ${bridge_exists}, "ip": "${BRIDGE_IP}"},
+  "bridge": {"exists": ${bridge_exists}, "ip": "${BRIDGE_CIDR}"},
   "tap_devices": [${tap_json}]
 }
 EOF
