@@ -86,6 +86,7 @@ case "${SUITE}" in
     fast)
         run_test_file "Fast CLI" "${SCRIPT_DIR}/test-fast-cli.sh"
         run_test_file "Run Adapter Wrapper" "${SCRIPT_DIR}/test-run-adapter-wrapper.sh"
+        run_test_file "Namespace Preflight" "${SCRIPT_DIR}/test-namespace-preflight.sh"
         ;;
     lab)
         run_test_file "Mesh Protocols" "${SCRIPT_DIR}/test-mesh-protocols.sh"
@@ -120,6 +121,16 @@ case "${SUITE}" in
         fi
         ;;
     namespace)
+        PREFLIGHT_EXIT=0
+        echo "--- Running: Namespace Preflight ---"
+        if bash "${SCRIPT_DIR}/../../scripts/qemu/preflight-namespace.sh" 2>&1; then
+            echo "Namespace preflight completed successfully."
+        else
+            PREFLIGHT_EXIT=$?
+            echo "Namespace preflight reported missing requirements (exit ${PREFLIGHT_EXIT})." >&2
+        fi
+        echo ""
+
         if [ "${RUN_NAMESPACE_TESTS:-0}" != "1" ]; then
             echo "Namespace suite skipped; set RUN_NAMESPACE_TESTS=1 when namespace tests are available."
         else
