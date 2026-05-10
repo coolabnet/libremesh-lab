@@ -1,0 +1,22 @@
+policy_version: "testbed"
+upgrade_rings:
+  - ring: canary
+    description: "Testbed canary"
+    nodes:
+      - "Testbed Node 1"
+    stabilization_period_hours: 0
+    auto_promote: false
+  - ring: inner
+    description: "Testbed inner"
+    nodes:
+      - "Testbed Node 2"
+    stabilization_period_hours: 0
+    auto_promote: false
+  - ring: outer
+    description: "Testbed outer"
+    nodes:
+      - "Testbed Node 3"
+      - "Testbed Node 4"
+    stabilization_period_hours: 0
+    auto_promote: false
+change_windows: []

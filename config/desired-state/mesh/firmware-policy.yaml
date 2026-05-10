@@ -1,0 +1,24 @@
+# Firmware policy for test bed nodes
+# Schema must match what tests/03-schema.sh validates
+# DISTRIB_RELEASE must match what configure-vms.sh writes to /etc/openwrt_release
+
+policy_version: "1.1"
+last_updated: "2026-05-04"
+updated_by: "testbed"
+
+global:
+  approved_version: "Mesha Testbed v0.1.0 (LibreMesh)"
+  release_notes_url: "https://github.com/libremesh/lime-packages"
+  upgrade_urgency: normal
+  notes: >
+    Firmware policy for the QEMU test bed. The approved version must match
+    the DISTRIB_RELEASE value written by configure-vms.sh.
+
+versions:
+  - version: "Mesha Testbed v0.1.0 (LibreMesh)"
+    status: approved
+    models_supported:
+      - "QEMU x86-64"
+    notes: "Test bed firmware built from source via build-libremesh-image.sh"
+
+model_overrides: []

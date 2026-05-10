@@ -1,0 +1,13 @@
+# Default community profile for test bed
+wifi:
+  ap_ssid: "MeshaTestBed"
+  apname: "MeshaTestBed"
+  mode: "adhoc"
+  channel: 11
+  channels_ht40: [36]
+network:
+  protocols:
+    - bmx7
+  main_ipv4_address: "10.99.0.%N/16"
+system:
+  domain: "testbed.mesh"

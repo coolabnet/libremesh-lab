@@ -1,0 +1,39 @@
+# Runtime state
+run/
+logs/
+exports/
+config/ssh-config.resolved
+
+# Build outputs and downloaded firmware
+images/*
+!images/
+!images/README.md
+*.qcow2
+*.img
+*.img.gz
+*.ext4
+*.tar.gz
+*.bin
+build-inputs.hash
+.cache-version
+
+# vwifi external checkout/build artifacts
+src/vwifi/
+bin/vwifi-*
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# OS/editor/cache noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+__pycache__/
+*.pyc
+.ruff_cache/

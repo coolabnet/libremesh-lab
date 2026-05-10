@@ -1,0 +1,11 @@
+# Test bed site definitions
+sites:
+  - id: testbed
+    name: "QEMU Test Bed"
+    location: "virtual"
+    nodes:
+      - lm-testbed-node-1
+      - lm-testbed-node-2
+      - lm-testbed-node-3
+    gateways:
+      - lm-testbed-node-1

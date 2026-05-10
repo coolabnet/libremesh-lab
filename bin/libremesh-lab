@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LAB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMMAND="${1:-}"
+
+usage() {
+  cat <<USAGE
+Usage: libremesh-lab <command> [args...]
+
+Commands:
+  build-image              Build or prepare a LibreMesh image
+  start                    Start the QEMU/vwifi lab
+  configure                Configure booted lab VMs
+  stop                     Stop VMs and clean lab networking/runtime state
+  status                   Print lab status as JSON
+  logs                     Collect lab logs
+  test                     Run lab QEMU tests
+  run-adapter <script>     Run an external adapter against lab config
+USAGE
+}
+
+if [ -z "${COMMAND}" ] || [ "${COMMAND}" = "-h" ] || [ "${COMMAND}" = "--help" ]; then
+  usage
+  exit 0
+fi
+shift || true
+
+case "${COMMAND}" in
+  build-image)
+    exec "${LAB_ROOT}/scripts/qemu/build-libremesh-image.sh" "$@"
+    ;;
+  start)
+    exec "${LAB_ROOT}/scripts/qemu/start-mesh.sh" "$@"
+    ;;
+  configure)
+    exec "${LAB_ROOT}/scripts/qemu/configure-vms.sh" "$@"
+    ;;
+  stop)
+    exec "${LAB_ROOT}/scripts/qemu/stop-mesh.sh" "$@"
+    ;;
+  status)
+    exec "${LAB_ROOT}/scripts/qemu/mesh-status.sh" "$@"
+    ;;
+  logs)
+    exec "${LAB_ROOT}/scripts/qemu/collect-logs.sh" "$@"
+    ;;
+  test)
+    exec "${LAB_ROOT}/tests/qemu/run-all.sh" "$@"
+    ;;
+  run-adapter)
+    exec "${LAB_ROOT}/scripts/qemu/run-testbed-adapter.sh" "$@"
+    ;;
+  *)
+    echo "Unknown command: ${COMMAND}" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

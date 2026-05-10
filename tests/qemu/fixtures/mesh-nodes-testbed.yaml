@@ -1,0 +1,17 @@
+nodes:
+  - name: "Testbed Node 1"
+    hostname: "lm-testbed-node-1"
+    role: gateway
+    status: online
+  - name: "Testbed Node 2"
+    hostname: "lm-testbed-node-2"
+    role: relay
+    status: online
+  - name: "Testbed Node 3"
+    hostname: "lm-testbed-node-3"
+    role: relay
+    status: online
+  - name: "Testbed Node 4"
+    hostname: "lm-testbed-tester"
+    role: leaf
+    status: online
