@@ -26,17 +26,12 @@ check_command() {
 }
 
 check_namespace_tool() {
-    if command -v unshare >/dev/null 2>&1; then
-        ok "namespace tool: unshare ($(command -v unshare))"
-        return
-    fi
-
-    if command -v ip >/dev/null 2>&1 && ip netns help >/dev/null 2>&1; then
+    if command -v ip >/dev/null 2>&1 && ip netns list >/dev/null 2>&1; then
         ok "namespace tool: ip netns"
         return
     fi
 
-    missing "namespace tool unavailable; install unshare or ip netns support"
+    missing "namespace tool unavailable; install iproute2 with ip netns support"
 }
 
 check_hwsim_module() {
@@ -73,6 +68,8 @@ check_command ip
 check_command iw
 check_command wmediumd
 check_command modprobe
+check_command ping
+check_command timeout
 check_namespace_tool
 check_hwsim_module
 

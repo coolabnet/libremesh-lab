@@ -27,7 +27,8 @@ keep these artifacts out of commits.
 - `RUN_LIFECYCLE_TESTS=1 bin/libremesh-lab test --suite lifecycle`: run
   destructive lifecycle coverage on an isolated host.
 - `bin/libremesh-lab test --suite namespace`: run the safe namespace/wmediumd
-  preflight and skip placeholder namespace tests unless `RUN_NAMESPACE_TESTS=1`.
+  preflight; use `sudo env RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite
+  namespace` on an isolated host for the root-gated hwsim/wmediumd smoke.
 - `bin/libremesh-lab stop`: stop VMs and clean runtime networking state.
 
 For a direct quick-start flow, use `sudo bin/libremesh-lab start`; it delegates
@@ -50,8 +51,9 @@ Tests are Bash integration tests with TAP-style output helpers from
 coverage for destructive flows. Lifecycle tests are gated behind
 `RUN_LIFECYCLE_TESTS=1`; convergence-sensitive tests can use `CONVERGE_WAIT` and
 `QEMU_TIMEOUT_MULTIPLIER`. Namespace/wmediumd work starts with the non-mutating
-`scripts/qemu/preflight-namespace.sh` check; do not add root-mutating namespace
-tests until cleanup behavior is verified on an isolated host.
+`scripts/qemu/preflight-namespace.sh` check; root-mutating namespace tests must
+be gated behind `RUN_NAMESPACE_TESTS=1` and must clean up namespaces, wmediumd,
+and disposable `mac80211_hwsim` radios.
 
 ## Commit & Pull Request Guidelines
 

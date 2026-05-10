@@ -84,24 +84,29 @@ Available suites:
 | `lab` | Already running and configured QEMU/vwifi lab | Mesh protocol and rollback checks |
 | `adapter` | Running lab plus `MESHA_ROOT=/path/to/mesha` | Mesha adapters, rollout, drift, validation, readonly, and failure-path checks |
 | `lifecycle` | Isolated host, root-capable start/stop, `RUN_LIFECYCLE_TESTS=1` | Destructive lifecycle cleanup coverage |
-| `namespace` | Future namespace/wmediumd prerequisites | Placeholder; skipped unless `RUN_NAMESPACE_TESTS=1`, then exits nonzero until implemented |
+| `namespace` | Isolated host with namespace/wmediumd prerequisites | Runs preflight by default; with `RUN_NAMESPACE_TESTS=1`, runs a root-gated two-node hwsim/wmediumd mesh smoke |
 
 `lab` and `adapter` do not create the VMs themselves. Build or prepare the
 firmware, start the lab with root privileges, wait for boot, run
 `bin/libremesh-lab configure`, and then run those suites. Use `CONVERGE_WAIT` and
 `QEMU_TIMEOUT_MULTIPLIER` on slower hosts.
 
-The namespace suite is still a placeholder for future namespace/wmediumd tests,
-but it runs the safe preflight first. The preflight checks for `ip`, `iw`,
-`wmediumd`, `modprobe`, `unshare` or `ip netns`, and `mac80211_hwsim`
-availability without creating namespaces, loading kernel modules, or requiring
-root:
+The namespace suite runs the safe preflight first. The preflight checks for
+`ip`, `ip netns`, `iw`, `wmediumd`, `modprobe`, `ping`, `timeout`, and
+`mac80211_hwsim` availability without creating namespaces, loading kernel
+modules, or requiring root:
 
 ```bash
 bash scripts/qemu/preflight-namespace.sh
 bin/libremesh-lab test --suite namespace
-RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite namespace
+sudo env RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite namespace
 ```
+
+With `RUN_NAMESPACE_TESTS=1`, the suite loads two disposable hwsim radios, moves
+one PHY into a network namespace, starts `wmediumd`, joins both interfaces to an
+802.11s mesh, verifies ping over the simulated medium, and cleans up. Run it
+only on an isolated host; if `mac80211_hwsim` is already loaded, set
+`LIBREMESH_LAB_NAMESPACE_RESET_HWSIM=1` only when it is safe to unload/reload it.
 
 ## Test Files
 
@@ -119,6 +124,7 @@ RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite namespace
 | `test-failure-paths.sh` | Unreachable hosts and adapter error handling |
 | `test-run-adapter-wrapper.sh` | No-VM adapter workspace isolation regression |
 | `test-namespace-preflight.sh` | No-root namespace/wmediumd preflight regression |
+| `test-namespace-wmediumd.sh` | Root-gated two-node hwsim/wmediumd namespace smoke |
 
 ## Adapter Isolation
 
@@ -149,15 +155,14 @@ dnsmasq, vwifi, QEMU, loopback mount, or namespace state. In practice, run
 host. `status`, `logs`, `configure`, `test --suite fast`, and `run-adapter`
 should run unprivileged after the lab exists.
 
-Namespace VM work is not active yet. Before adding real namespace tests, start
-with the non-mutating preflight:
+Namespace work starts with the non-mutating preflight:
 
 ```bash
 bash scripts/qemu/preflight-namespace.sh
 ```
 
-Only move on to root-backed namespace creation or module loading on an isolated
-host after bridge, namespace, and wireless simulation cleanup is verified.
+Only run root-backed namespace creation or module loading on an isolated host
+after bridge, namespace, and wireless simulation cleanup expectations are clear.
 
 ## Known Limitations
 

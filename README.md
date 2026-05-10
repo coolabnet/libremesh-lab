@@ -143,7 +143,7 @@ coverage explicitly:
 | `lab` | Yes, already running and configured | No | Root only for prior `start`/later `stop` | Mesh protocol and rollback checks |
 | `adapter` | Yes, already running and configured | Yes, `MESHA_ROOT=/path/to/mesha` | Root only for prior `start`/later `stop` | Mesha adapter, rollout, drift, validation, and failure-path coverage |
 | `lifecycle` | It starts/stops the lab | Optional for topology checks | Yes; set `RUN_LIFECYCLE_TESTS=1` | Destructive lifecycle and cleanup coverage |
-| `namespace` | Future track | No | Future namespace privileges | Placeholder for host namespace/wmediumd tests |
+| `namespace` | Host namespace/wmediumd smoke | No | Yes when `RUN_NAMESPACE_TESTS=1` | Two-radio hwsim + wmediumd mesh ping in network namespaces |
 
 Run the default safe suite:
 
@@ -159,20 +159,29 @@ libremesh-lab test --suite lab
 MESHA_ROOT=/path/to/mesha libremesh-lab test --suite adapter
 ```
 
-The namespace suite is not implemented yet, but it runs the safe host preflight
-first:
+The namespace suite always runs the safe host preflight first:
 
 ```bash
 bash scripts/qemu/preflight-namespace.sh
 libremesh-lab test --suite namespace
 ```
 
-The preflight checks for tools and kernel support such as `ip`, `iw`, `wmediumd`,
-`modprobe`, `unshare` or `ip netns`, and `mac80211_hwsim` availability without
-creating namespaces, loading modules, or requiring root. Without
+The preflight checks for tools and kernel support such as `ip`, `ip netns`,
+`iw`, `wmediumd`, `modprobe`, `ping`, `timeout`, and `mac80211_hwsim`
+availability without creating namespaces, loading modules, or requiring root. Without
 `RUN_NAMESPACE_TESTS=1`, `--suite namespace` reports the preflight result, prints
-a skip-style message, and exits zero; with the variable set it exits nonzero
-until real namespace tests land.
+a skip-style message, and exits zero. On an isolated host with preflight passing,
+run the root-gated smoke test with:
+
+```bash
+sudo env RUN_NAMESPACE_TESTS=1 libremesh-lab test --suite namespace
+```
+
+The smoke test loads two disposable `mac80211_hwsim` radios, moves one PHY into a
+network namespace, starts `wmediumd`, joins both interfaces to an 802.11s mesh,
+pings across the simulated medium, and cleans up. If `mac80211_hwsim` is already
+loaded, the test refuses to proceed unless
+`LIBREMESH_LAB_NAMESPACE_RESET_HWSIM=1` is set.
 
 ### Test files
 
@@ -190,6 +199,7 @@ until real namespace tests land.
 | `test-failure-paths.sh` | Error handling and failure scenarios |
 | `test-run-adapter-wrapper.sh` | No-VM adapter workspace isolation regression |
 | `test-namespace-preflight.sh` | No-root namespace/wmediumd preflight regression |
+| `test-namespace-wmediumd.sh` | Root-gated two-node hwsim/wmediumd namespace smoke |
 
 Run the safe suite:
 

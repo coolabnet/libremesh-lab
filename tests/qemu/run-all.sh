@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUITE="fast"
+NAMESPACE_PREFLIGHT="${LIBREMESH_LAB_NAMESPACE_PREFLIGHT:-${SCRIPT_DIR}/../../scripts/qemu/preflight-namespace.sh}"
+NAMESPACE_TEST="${LIBREMESH_LAB_NAMESPACE_TEST:-${SCRIPT_DIR}/test-namespace-wmediumd.sh}"
 
 # Optional: wait time for BMX7 convergence (seconds)
 CONVERGE_WAIT="${CONVERGE_WAIT:-30}"
@@ -17,7 +19,7 @@ Suites:
   lab         Tests that require an already running/configured QEMU lab
   adapter     Adapter tests that require a running lab and MESHA_ROOT
   lifecycle   Destructive start/stop/topology lifecycle tests; requires RUN_LIFECYCLE_TESTS=1
-  namespace   Future host namespace/wmediumd tests; skipped unless RUN_NAMESPACE_TESTS=1
+  namespace   Safe preflight by default; root hwsim/wmediumd smoke with RUN_NAMESPACE_TESTS=1
 USAGE
 }
 
@@ -123,7 +125,7 @@ case "${SUITE}" in
     namespace)
         PREFLIGHT_EXIT=0
         echo "--- Running: Namespace Preflight ---"
-        if bash "${SCRIPT_DIR}/../../scripts/qemu/preflight-namespace.sh" 2>&1; then
+        if bash "${NAMESPACE_PREFLIGHT}" 2>&1; then
             echo "Namespace preflight completed successfully."
         else
             PREFLIGHT_EXIT=$?
@@ -132,10 +134,12 @@ case "${SUITE}" in
         echo ""
 
         if [ "${RUN_NAMESPACE_TESTS:-0}" != "1" ]; then
-            echo "Namespace suite skipped; set RUN_NAMESPACE_TESTS=1 when namespace tests are available."
-        else
-            echo "ERROR: Namespace suite requested, but namespace tests are not implemented yet." >&2
+            echo "Namespace smoke skipped; set RUN_NAMESPACE_TESTS=1 on an isolated root-capable host to run it."
+        elif [ "${PREFLIGHT_EXIT}" -ne 0 ]; then
+            echo "ERROR: Namespace suite requested, but preflight requirements are missing." >&2
             OVERALL_RESULT=1
+        else
+            run_test_file "Namespace Wmediumd" "${NAMESPACE_TEST}"
         fi
         ;;
     *)

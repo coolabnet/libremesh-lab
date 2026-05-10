@@ -29,13 +29,13 @@ Expected:
 - Only intentional local files are modified or ignored.
 - `bash`, `git`, `curl`, `python3`, and `ssh` are present for basic QA.
 - QEMU, `ip`, and `dnsmasq` are present before VM-backed phases.
-- `iw`, `wmediumd`, `modprobe`, and namespace tooling are recorded for namespace-track readiness.
+- `iw`, `wmediumd`, `modprobe`, and `ip netns` support are recorded for namespace-track readiness.
 
 ## 2. Static Checks
 
 ```bash
 bash -n scripts/install.sh bin/libremesh-lab scripts/qemu/*.sh scripts/qemu/lib/*.sh tests/qemu/*.sh
-shellcheck -x -P tests/qemu scripts/install.sh bin/libremesh-lab scripts/qemu/run-testbed-adapter.sh scripts/qemu/preflight-namespace.sh tests/qemu/run-all.sh tests/qemu/test-fast-cli.sh tests/qemu/test-run-adapter-wrapper.sh tests/qemu/test-namespace-preflight.sh
+shellcheck -x -P tests/qemu scripts/install.sh bin/libremesh-lab scripts/qemu/run-testbed-adapter.sh scripts/qemu/preflight-namespace.sh tests/qemu/run-all.sh tests/qemu/test-fast-cli.sh tests/qemu/test-run-adapter-wrapper.sh tests/qemu/test-namespace-preflight.sh tests/qemu/test-namespace-wmediumd.sh
 git diff --check
 ```
 
@@ -238,8 +238,8 @@ Expected:
 
 ## 11. Namespace Track
 
-The namespace suite is a placeholder until namespace/wmediumd tests exist. First
-run the safe, non-mutating host preflight:
+The namespace suite has a safe preflight and a root-gated hwsim/wmediumd smoke.
+First run the safe, non-mutating host preflight:
 
 ```bash
 bash scripts/qemu/preflight-namespace.sh
@@ -247,20 +247,21 @@ bash scripts/qemu/preflight-namespace.sh
 
 Expected:
 
-- The preflight checks `ip`, `iw`, `wmediumd`, `modprobe`, namespace tooling, and `mac80211_hwsim` availability without requiring root or mutating host state.
+- The preflight checks `ip`, `ip netns`, `iw`, `wmediumd`, `modprobe`, `ping`, `timeout`, and `mac80211_hwsim` availability without requiring root or mutating host state.
 - Missing `mac80211_hwsim` or `wmediumd` is recorded as a namespace-track blocker, not a fast/lab/adapter suite blocker.
 
 Then record current suite behavior:
 
 ```bash
 bin/libremesh-lab test --suite namespace
-RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite namespace
+sudo env RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite namespace
 ```
 
 Expected:
 
 - Without `RUN_NAMESPACE_TESTS=1`, the suite reports preflight, then a skip-like message, and exits zero.
-- With `RUN_NAMESPACE_TESTS=1`, it reports preflight first, then exits nonzero until real namespace tests are implemented.
+- With `RUN_NAMESPACE_TESTS=1`, it reports preflight first, then creates two disposable hwsim radios, moves one PHY into a network namespace, starts `wmediumd`, joins an 802.11s mesh, verifies ping over the simulated medium, and cleans up.
+- If `mac80211_hwsim` is already loaded, the smoke test refuses to continue unless `LIBREMESH_LAB_NAMESPACE_RESET_HWSIM=1` is set on an isolated host.
 
 ## 12. Final Report
 
