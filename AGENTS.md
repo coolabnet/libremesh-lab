@@ -19,12 +19,20 @@ keep these artifacts out of commits.
   privileges for bridges, TAP devices, dnsmasq, and QEMU networking.
 - `bin/libremesh-lab configure`: configure booted lab VMs after startup.
 - `bin/libremesh-lab status`: print current lab status as JSON.
-- `bin/libremesh-lab test`: run `tests/qemu/run-all.sh`.
+- `bin/libremesh-lab test`: run the default VM-free `fast` suite.
+- `bin/libremesh-lab test --suite lab`: run tests that require an already
+  running and configured QEMU/vwifi lab.
+- `MESHA_ROOT=/path/to/mesha bin/libremesh-lab test --suite adapter`: run Mesha
+  adapter tests against a running lab.
+- `RUN_LIFECYCLE_TESTS=1 bin/libremesh-lab test --suite lifecycle`: run
+  destructive lifecycle coverage on an isolated host.
+- `bin/libremesh-lab test --suite namespace`: run the safe namespace/wmediumd
+  preflight and skip placeholder namespace tests unless `RUN_NAMESPACE_TESTS=1`.
 - `bin/libremesh-lab stop`: stop VMs and clean runtime networking state.
 
-For a direct quick-start flow, use the scripts documented in `docs/README.md`,
-including `sudo bash scripts/qemu/start-vwifi.sh` and
-`sudo bash scripts/qemu/start-mesh.sh`.
+For a direct quick-start flow, use `sudo bin/libremesh-lab start`; it delegates
+to `scripts/qemu/start-mesh.sh`, which starts vwifi before booting VMs. Use the
+lower-level scripts in `docs/README.md` only when debugging an individual phase.
 
 ## Coding Style & Naming Conventions
 
@@ -41,7 +49,9 @@ Tests are Bash integration tests with TAP-style output helpers from
 `common.sh`, and add new suite entries to `tests/qemu/run-all.sh`. Prefer dry-run
 coverage for destructive flows. Lifecycle tests are gated behind
 `RUN_LIFECYCLE_TESTS=1`; convergence-sensitive tests can use `CONVERGE_WAIT` and
-`QEMU_TIMEOUT_MULTIPLIER`.
+`QEMU_TIMEOUT_MULTIPLIER`. Namespace/wmediumd work starts with the non-mutating
+`scripts/qemu/preflight-namespace.sh` check; do not add root-mutating namespace
+tests until cleanup behavior is verified on an isolated host.
 
 ## Commit & Pull Request Guidelines
 
