@@ -705,7 +705,7 @@ main() {
                         # Match tests/qemu/common.sh:count_mesh_neighbors:
                         # in this wired bridge topology, babeld convergence is
                         # the UDP listener being up, not installed route count.
-                        peer_count=$(ssh_vm "$ip" "netstat -ulnp 2>/dev/null | grep -q babeld && echo 1 || echo 0" 2>/dev/null || echo "0")
+                        peer_count=$(ssh_vm "$ip" "(netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -q babeld && echo 1 || echo 0" 2>/dev/null || echo "0")
                         ;;
                 esac
                 peer_count=$(echo "$peer_count" | tr -d '[:space:]')

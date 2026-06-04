@@ -197,7 +197,7 @@ if [[ "${FORCE_REBUILD}" == "false" ]] && [[ -f "${CACHED_HASH_FILE}" ]]; then
   The cached image has no SSH keys or DHCP setup.
   Run: scripts/qemu/configure-source-image.sh --image ${DEST_IMG}"
             fi
-            log "WARN: No cached .img.gz found to restore symlink from."
+            die "No cached .img.gz found in ${OUTPUT_DIR}; cannot restore symlink. Re-run without --skip-rebuild or delete the hash file to trigger a fresh build."
         fi
 
         exit 0

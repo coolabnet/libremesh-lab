@@ -235,7 +235,7 @@ count_mesh_neighbors() {
                 # "babeld is up and serving". We deliberately do NOT count
                 # kernel routes: in a wired br-lan topology babeld legitimately
                 # installs 0 routes (L2 handles neighbor reachability).
-                babel_listen=$(ssh_vm "$host" "netstat -ulnp 2>/dev/null | awk '/:/ && /babeld/ {print \$4}' | wc -l" 2>/dev/null | tr -d '[:space:]')
+                babel_listen=$(ssh_vm "$host" "(netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | awk '/:/ && /babeld/ {print \$0}' | wc -l" 2>/dev/null | tr -d '[:space:]')
                 if [ "${babel_listen:-0}" -ge 1 ]; then
                     count=1
                 else
