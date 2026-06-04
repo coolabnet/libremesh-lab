@@ -133,9 +133,15 @@ sleep 2
 restart_mesh_protocol "$NODE2"
 sleep 8
 PROTO_AFTER=$(detect_mesh_protocol "$NODE2")
+case "${PROTO}" in
+    babeld) PROTO_PROCESS="babeld" ;;
+    bmx7) PROTO_PROCESS="bmx7" ;;
+    batman-adv) PROTO_PROCESS="batmand" ;;
+    *) PROTO_PROCESS="" ;;
+esac
 if [ "${PROTO_BEFORE}" != "${PROTO_AFTER}" ]; then
     fail "test_mesh_protocol_restart_works" "protocol changed: ${PROTO_BEFORE} -> ${PROTO_AFTER}"
-elif ! ssh_vm "$NODE2" "pgrep -x ${PROTO} >/dev/null 2>&1 || pgrep -f /usr/sbin/${PROTO} >/dev/null 2>&1 || pgrep -f bmx7 >/dev/null 2>&1 || pgrep -f batmand >/dev/null 2>&1" 2>/dev/null; then
+elif [ -z "${PROTO_PROCESS}" ] || ! ssh_vm "$NODE2" "pgrep -x ${PROTO_PROCESS} >/dev/null 2>&1 || pgrep -f /usr/sbin/${PROTO_PROCESS} >/dev/null 2>&1" 2>/dev/null; then
     fail "test_mesh_protocol_restart_works" "${PROTO} not running on ${NODE2} after restart"
 elif ! ssh_vm "$NODE2" "ping -c 1 -W 5 10.99.0.11" >/dev/null 2>&1; then
     fail "test_mesh_protocol_restart_works" "${NODE2} cannot reach gateway after ${PROTO} restart"

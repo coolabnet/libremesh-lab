@@ -50,9 +50,10 @@ wmediumd is not packaged for Ubuntu. Build it from source and install to
 scripts/qemu/build-wmediumd.sh
 ```
 
-This clones the [cozybit/wmediumd](https://github.com/cozybit/wmediumd) fork,
-compiles it, and installs the binary and libconfig runtime into `bin/`. The
-namespace preflight and tests will find it there automatically.
+This clones a pinned [cozybit/wmediumd](https://github.com/cozybit/wmediumd)
+commit, compiles it, and installs the binary and libconfig runtime into `bin/`.
+Set `WMEDIUMD_REPO` / `WMEDIUMD_REF` only when deliberately testing a fork or
+upgrade. The namespace preflight and tests will find the binary automatically.
 
 ### 4. Start Runner
 

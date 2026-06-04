@@ -5,9 +5,9 @@
 # Dependencies: libnl-3-dev, libnl-genl-3-dev, libconfig-dev (Debian/Ubuntu)
 #              or equivalent pkg-config packages on other distros.
 #
-# Reproducibility: pin a commit (WMEDIUMD_REF) so a self-hosted runner
-# cannot silently rebuild against a mutated upstream. Override with
-# WMEDIUMD_REPO=... WMEDIUMD_REF=... to test a fork or branch.
+# Reproducibility: the default WMEDIUMD_REF is pinned to a commit SHA so
+# a self-hosted runner cannot silently rebuild against a mutated upstream.
+# Override with WMEDIUMD_REPO=... WMEDIUMD_REF=... to test a fork or branch.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,13 +22,11 @@ BUILD_DIR="$(mktemp -d /tmp/libremesh-lab-wmediumd-XXXXXX)"
 trap 'rm -rf "${BUILD_DIR}"' EXIT INT TERM
 
 # Pin a specific ref (branch, tag, or commit SHA). Override via env to
-# test forks; the default is the upstream `master` branch, which is a
-# MOVING TARGET. For reproducible CI/self-hosted-runner builds, set
-# WMEDIUMD_REF to a specific commit SHA (recommended) or a tag. Bump
-# this when upgrading and verify the namespace smoke test still passes
-# on a self-hosted runner before relying on the new build.
+# test forks; the default is a known cozybit/wmediumd commit. Bump this
+# when upgrading and verify the namespace smoke test still passes on a
+# self-hosted runner before relying on the new build.
 WMEDIUMD_REPO="${WMEDIUMD_REPO:-https://github.com/cozybit/wmediumd.git}"
-WMEDIUMD_REF="${WMEDIUMD_REF:-master}"
+WMEDIUMD_REF="${WMEDIUMD_REF:-c13aaeb0cdfb784ccb34e1b0f9ece7762665f882}"
 
 echo "=== Building wmediumd (${WMEDIUMD_REPO} @ ${WMEDIUMD_REF}) ==="
 echo "  Build dir: ${BUILD_DIR}"

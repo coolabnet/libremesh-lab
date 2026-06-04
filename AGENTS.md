@@ -36,8 +36,9 @@ keep these artifacts out of commits.
   `bin/wmediumd` / `bin/lib/`. Use it as the safe teardown after a
   `start` + `configure` + `test` session, especially on shared hosts.
 - `scripts/qemu/build-wmediumd.sh`: build a relocatable wmediumd binary
-  (with vendored libconfig) into `bin/wmediumd`. Pins `WMEDIUMD_REPO` and
-  `WMEDIUMD_REF` (default `master`; pin a SHA for reproducibility).
+  (with vendored libconfig) into `bin/wmediumd`. Defaults to a pinned
+  `WMEDIUMD_REF` SHA; override `WMEDIUMD_REPO` / `WMEDIUMD_REF` deliberately
+  when testing forks or upgrades.
 
 ## Workflow (full cycle)
 
