@@ -131,9 +131,21 @@ start_mesh_daemon_on_vm() {
 # Tries key auth first (if SSH key exists), falls back to password auth.
 # This makes the script work with both source-built (pre-baked keys) and
 # prebuilt images (password auth) transparently.
+ssh_target() {
+    local host="$1"
+
+    if [[ "${host}" == *:* && "${host}" != \[*\] ]]; then
+        printf 'root@[%s]' "${host}"
+    else
+        printf 'root@%s' "${host}"
+    fi
+}
+
 ssh_vm() {
     local ip="$1"
     shift
+    local target
+    target="$(ssh_target "${ip}")"
 
     # Try key-based auth first when key file exists (source-built images)
     if [[ -f "${SSH_KEY}" ]]; then
@@ -144,7 +156,7 @@ ssh_vm() {
             -o IdentitiesOnly=yes \
             -i "${SSH_KEY}" \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "root@${ip}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" 2>/dev/null && return 0
     fi
 
     # Fallback: password auth via sshpass (empty password for source-built images)
@@ -155,7 +167,7 @@ ssh_vm() {
             -o HostKeyAlgorithms=+ssh-rsa \
             -o PreferredAuthentications=password \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "root@${ip}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" 2>/dev/null && return 0
     fi
 
     # Last resort: try with password "root" (for prebuilt images)
@@ -165,7 +177,7 @@ ssh_vm() {
             -o HostKeyAlgorithms=+ssh-rsa \
             -o PreferredAuthentications=password \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "root@${ip}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" 2>/dev/null && return 0
     fi
 
     return 1
@@ -174,6 +186,9 @@ ssh_vm() {
 ssh_vm_with_key() {
     local ip="$1"
     shift
+    local target
+    target="$(ssh_target "${ip}")"
+
     ssh -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -o HostKeyAlgorithms=+ssh-rsa \
@@ -182,7 +197,7 @@ ssh_vm_with_key() {
         -o PreferredAuthentications=publickey \
         -i "${SSH_KEY}" \
         -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-        "root@${ip}" "$@"
+        "${target}" "$@"
 }
 
 # ─── Wait for SSH on a VM ───
