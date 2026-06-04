@@ -6,13 +6,6 @@
 # A cmdline check (`grep -q "qemu-system" /proc/$pid/cmdline`) was also
 # added to defeat PID-reuse false positives after a QEMU exit.
 #
-# shellcheck disable=SC1078,SC1079,SC2026
-# SC1078/SC1079/SC2026 fire on the multi-line `${PYTHON} -c '…'` blocks
-# below because the Python f-strings contain nested single quotes
-# (`f"...{x.get('running')}"`). The shell's quote tracking loses sync
-# with the actual content (the entire `-c` argument is a single shell
-# string); the warnings are false positives. Refactoring to heredocs
-# would add 4× the line count without changing behavior.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -151,7 +144,7 @@ data = json.load(sys.stdin)
 vms = data.get("vms", [])
 node1 = next((vm for vm in vms if vm.get("id") == 1), None)
 assert node1 is not None, "node-1 missing from vms"
-assert node1.get("running") is True, f"expected node-1.running=True, got {node1.get('running')}"
+assert node1.get("running") is True, "expected node-1.running=True, got %r" % node1.get("running")
 ' 2>/dev/null; then
         pass "test_mesh_status_reports_live_pid_as_running"
     else
@@ -175,7 +168,7 @@ data = json.load(sys.stdin)
 vms = data.get("vms", [])
 node1 = next((vm for vm in vms if vm.get("id") == 1), None)
 assert node1 is not None, "node-1 missing from vms"
-assert node1.get("running") is False, f"expected node-1.running=False, got {node1.get('running')}"
+assert node1.get("running") is False, "expected node-1.running=False, got %r" % node1.get("running")
 ' 2>/dev/null; then
         pass "test_mesh_status_reports_stale_pid_as_stopped"
     else
@@ -196,7 +189,7 @@ data = json.load(sys.stdin)
 vms = data.get("vms", [])
 node1 = next((vm for vm in vms if vm.get("id") == 1), None)
 assert node1 is not None, "node-1 missing from vms"
-assert node1.get("running") is False, f"expected node-1.running=False, got {node1.get('running')}"
+assert node1.get("running") is False, "expected node-1.running=False, got %r" % node1.get("running")
 ' 2>/dev/null; then
     pass "test_mesh_status_pid_check_survives_unreadable_pid_file"
 else
@@ -225,8 +218,8 @@ else
 import json, sys
 data = json.load(sys.stdin)
 vwifi = data.get("vwifi_server", {})
-assert vwifi.get("running") is True, f"expected vwifi_server.running=True, got {vwifi.get('running')}"
-assert vwifi.get("pid") != 0, f"expected vwifi_server.pid != 0, got {vwifi.get('pid')}"
+assert vwifi.get("running") is True, "expected vwifi_server.running=True, got %r" % vwifi.get("running")
+assert vwifi.get("pid") != 0, "expected vwifi_server.pid != 0, got %r" % vwifi.get("pid")
 ' 2>/dev/null; then
         pass "test_mesh_status_vwifi_pid_reports_live"
     else
@@ -246,8 +239,8 @@ if [ "${STALE_PID_UNAVAILABLE}" != "true" ]; then
 import json, sys
 data = json.load(sys.stdin)
 vwifi = data.get("vwifi_server", {})
-assert vwifi.get("running") is False, f"expected vwifi_server.running=False, got {vwifi.get('running')}"
-assert vwifi.get("pid") == 0, f"expected vwifi_server.pid=0, got {vwifi.get('pid')}"
+assert vwifi.get("running") is False, "expected vwifi_server.running=False, got %r" % vwifi.get("running")
+assert vwifi.get("pid") == 0, "expected vwifi_server.pid=0, got %r" % vwifi.get("pid")
 ' 2>/dev/null; then
         pass "test_mesh_status_vwifi_pid_reports_stale"
     else
