@@ -221,7 +221,7 @@ fi
 # testbed helpers shell out to `service <name> <action>`. Inject a minimal
 # shim that maps to /etc/init.d/<name> <action>.
 SERVICE_SHIM="${MOUNT_POINT}/sbin/service"
-if ! sudo head -1 "${SERVICE_SHIM}" 2>/dev/null | grep -q 'service shim'; then
+if ! sudo grep -q 'service shim for OpenWrt' "${SERVICE_SHIM}" 2>/dev/null; then
     sudo mkdir -p "${MOUNT_POINT}/sbin"
     sudo tee "${SERVICE_SHIM}" >/dev/null <<'SERVICEEOF'
 #!/bin/sh
