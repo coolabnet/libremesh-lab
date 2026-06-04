@@ -474,6 +474,7 @@ generate_and_inject_keys() {
         if [[ -f "${SSH_KEY}" ]]; then
             ssh -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null \
+                -o HostKeyAlgorithms=+ssh-rsa \
                 -o BatchMode=yes \
                 -o IdentitiesOnly=yes \
                 -i "${SSH_KEY}" \
@@ -486,6 +487,7 @@ generate_and_inject_keys() {
         if ! $injected && command -v sshpass >/dev/null 2>&1; then
             sshpass -p "" ssh -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null \
+                -o HostKeyAlgorithms=+ssh-rsa \
                 -o PreferredAuthentications=password \
                 -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
                 "root@${ip}" \
@@ -495,6 +497,7 @@ generate_and_inject_keys() {
         if ! $injected && command -v sshpass >/dev/null 2>&1; then
             sshpass -p "root" ssh -o StrictHostKeyChecking=no \
                 -o UserKnownHostsFile=/dev/null \
+                -o HostKeyAlgorithms=+ssh-rsa \
                 -o PreferredAuthentications=password \
                 -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
                 "root@${ip}" \

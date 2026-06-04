@@ -77,13 +77,11 @@ if ldd "${BIN_DIR}/wmediumd" 2>/dev/null | grep -q 'libconfig'; then
         mkdir -p "${LIB_DIR}"
         cp "${LIBCONFIG_SO}" "${LIB_DIR}/"
         LIBCONFIG_BASENAME="$(basename "${LIBCONFIG_SO}")"
-        # SONAME looks like "libconfig.so.9"; extract the trailing version.
-        # An unversioned SONAME ("libconfig.so" with no dot) is unusual but
-        # possible if the system lib has no ABI version; skip the SONAME
-        # symlink in that case — the basename already matches the SONAME
-        # the loader expects.
-        LIBCONFIG_SONAME_VER="${SONAME##*.}"
-        if [ -n "${LIBCONFIG_SONAME_VER}" ] && [ "${SONAME}" != "${LIBCONFIG_SONAME_VER}" ]; then
+        # SONAME looks like "libconfig.so.9"; only create a SONAME
+        # symlink when an ABI version is present. An unversioned SONAME
+        # ("libconfig.so") already matches the loader's expected name.
+        if [[ "${SONAME}" =~ ^libconfig\.so\.(.+)$ ]]; then
+            LIBCONFIG_SONAME_VER="${BASH_REMATCH[1]}"
             LIBCONFIG_SONAME_FILE="libconfig.so.${LIBCONFIG_SONAME_VER}"
             # Only create the SONAME symlink when the copied file's basename
             # actually differs from it. Otherwise the symlink would point at
