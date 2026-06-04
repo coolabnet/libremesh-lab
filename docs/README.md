@@ -1,5 +1,7 @@
 # LibreMesh Lab
 
+> See [AGENTS.md](../AGENTS.md) for the agent-facing workflow and repository conventions.
+
 ## Quick Start
 
 Install the CLI into the default user-local location:
@@ -18,21 +20,23 @@ bin/libremesh-lab build-image
 # OR use pre-built image conversion:
 bash scripts/qemu/convert-prebuilt.sh
 
-# 2. Start the test bed (requires root for bridge/TAP/dnsmasq/QEMU networking)
+# 2. (Source-built images only) Install SSH keys and DHCP into the image
+scripts/qemu/configure-source-image.sh --image images/libremesh-combined.img
+
+# 3. Start the test bed (requires root for bridge/TAP/dnsmasq/QEMU networking)
 sudo bin/libremesh-lab start
 
-# 3. Configure VMs (wait ~90s for boot)
+# 4. Configure VMs (wait ~90s for boot)
 bin/libremesh-lab configure
 
-# 4. Run the safe VM-free suite
-bin/libremesh-lab test --suite fast
-
-# 5. Run VM-backed checks while the lab is still running
-bin/libremesh-lab test --suite lab
+# 5. Run tests
+bin/libremesh-lab test                   # safe VM-free suite
+bin/libremesh-lab test --suite lab       # VM-backed checks
 MESHA_ROOT=/path/to/mesha bin/libremesh-lab test --suite adapter
 
-# 6. Stop the test bed
-sudo bash scripts/qemu/stop-mesh.sh
+# 6. Teardown
+sudo bin/rollback-lab.sh                 # stop lab, clean up networking
+sudo bin/rollback-lab.sh --full          # also remove sudo rule + wmediumd binary
 ```
 
 ## Architecture
@@ -56,15 +60,22 @@ The host (10.99.0.254) runs vwifi-server for inter-VM WiFi frame relay.
 
 | Script | Purpose |
 |--------|---------|
+| `rollback-lab.sh` | Comprehensive teardown: stop lab, kill scoped processes, remove TAPs/bridge, clean runtime state, verify idempotent cleanup. Run with `sudo`. |
 | `build-libremesh-image.sh` | Build custom LibreMesh firmware with vwifi support |
+| `build-wmediumd.sh` | Build a relocatable wmediumd binary with vendored libconfig into `bin/` |
 | `convert-prebuilt.sh` | Download and convert LibreRouterOS pre-built image |
+| `configure-source-image.sh` | Mount a source-built image, install SSH keys and DHCP config |
+| `configure-source-vms.sh` | Configure source-built VMs via serial console (SSH keys, hostname, IP) |
+| `configure-vms.sh` | Post-boot: hostname, IP, mesh protocol (babeld/bmx7), lime-config, SSH keys |
+| `inject-keys-serial.sh` | Inject SSH public key into running VM via serial console |
+| `prepare-source-image.sh` | Mount a source-built ext4 image, pre-bake SSH keys and known_hosts |
 | `start-vwifi.sh` | Compile and launch vwifi-server |
 | `start-mesh.sh` | Launch 4 QEMU VMs with TAP/bridge networking |
-| `configure-vms.sh` | Post-boot: hostname, IP, BMX7, lime-config, SSH keys |
-| `stop-mesh.sh` | Teardown: kill VMs, cleanup TAP/bridge |
-| `mesh-status.sh` | Status check: VM state, SSH, vwifi, bridge |
+| `stop-mesh.sh` | Stop VMs via pid files (for simple stop without full cleanup; prefer `rollback-lab.sh`) |
+| `mesh-status.sh` | Status check: VM state, SSH, vwifi, bridge, PID aliveness |
 | `run-testbed-adapter.sh` | Run adapter scripts with testbed path mapping |
 | `validate-adapters.sh` | Validate all adapter scripts against test bed |
+| `preflight-namespace.sh` | Non-mutating check for namespace/wmediumd tool availability |
 | `collect-logs.sh` | Collect logs for CI artifact upload |
 
 ## Suite Selection
@@ -112,19 +123,22 @@ only on an isolated host; if `mac80211_hwsim` is already loaded, set
 
 | Test file | Tests |
 |-----------|-------|
-| `test-adapters.sh` | collect-nodes JSON, collect-topology, thisnode discovery, ip -j |
-| `test-mesh-protocols.sh` | BMX7 neighbors, originators, mesh routing, Babel fallback |
-| `test-validate-node.sh` | Healthy node, missing SSID detection, no neighbors |
+| `test-fast-cli.sh` | CLI contract: status JSON, stop path, missing suite error |
+| `test-run-adapter.sh` | No-VM adapter workspace isolation, source writeback prevention |
+| `test-qemu-script-units.sh` | Static unit tests: convert-prebuilt parser, fdisk partition-2 awk, ed25519 ssh-config migration |
+| `test-mesh-status-pid.sh` | Runtime PID aliveness checks: /proc-based detection, stale PID, vwifi PID |
+| `test-mesh-protocols.sh` | Protocol-agnostic convergence: detected protocol active, gateway alive, routing, restart |
+| `test-validate-node.sh` | Healthy node, missing SSID detection, no neighbors detection (protocol-agnostic) |
 | `test-config-drift.sh` | UCI write/read, drift detection |
-| `test-topology-manipulation.sh` | vwifi-ctrl distance-based loss, node removal |
+| `test-topology-manipulation.sh` | vwifi-ctrl distance-based loss (bmx7 TQ), protocol-agnostic node removal detection |
 | `test-firmware-upgrade.sh` | Firmware version change, validate-node mismatch |
-| `test-multi-hop.sh` | End-to-end multi-hop connectivity |
+| `test-multi-hop.sh` | End-to-end multi-hop connectivity (protocol-agnostic) |
 | `test-rollback.sh` | Configuration backup and rollback |
 | `test-rollout.sh` | Rolling configuration update dry runs |
-| `test-failure-paths.sh` | Unreachable hosts and adapter error handling |
-| `test-run-adapter-wrapper.sh` | No-VM adapter workspace isolation regression |
-| `test-namespace-preflight.sh` | No-root namespace/wmediumd preflight regression |
+| `test-failure-paths.sh` | Unreachable hosts and adapter error handling (protocol-agnostic recovery) |
+| `test-topologies.sh` | Line, star, and partition topology convergence (protocol-agnostic) |
 | `test-namespace-wmediumd.sh` | Root-gated two-node hwsim/wmediumd namespace smoke |
+| `test-namespace-preflight.sh` | No-root namespace/wmediumd preflight regression |
 
 ## Adapter Isolation
 
@@ -168,7 +182,9 @@ after bridge, namespace, and wireless simulation cleanup expectations are clear.
 
 - TCG mode (no KVM) is 3x slower — increase timeouts
 - Pre-built images lack WiFi simulation (mac80211_hwsim, vwifi)
-- BMX7 convergence takes 30-60s in virtualized environment
+- Mesh protocol convergence (babeld or bmx7) takes 30-60s in a virtualized environment
+- babeld in a wired br-lan topology installs 0 kernel routes (L2 already handles reachability);
+  neighbour count is verified via the daemon's UDP listener presence instead
 - vwifi-ctrl only supports global packet loss (not per-link)
 
 ## Troubleshooting
