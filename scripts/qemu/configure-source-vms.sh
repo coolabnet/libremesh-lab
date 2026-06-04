@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SSH_KEY_FILE="${REPO_ROOT}/run/ssh-keys/id_rsa.pub"
+SSH_KEY_FILE="${REPO_ROOT}/run/ssh-keys/id_ed25519.pub"
 NODE_IPS=("10.99.0.11" "10.99.0.12" "10.99.0.13" "10.99.0.14")
 NODE_HOSTNAMES=("lm-testbed-node-1" "lm-testbed-node-2" "lm-testbed-node-3" "lm-testbed-node-4")
 TIMEOUT="${CONFIGURE_TIMEOUT:-30}"
@@ -190,7 +190,7 @@ configure_node() {
     local ssh_ok=false
     for i in $(seq 1 15); do
         if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+            -o HostKeyAlgorithms=+ssh-rsa \
             -o ConnectTimeout=2 -o BatchMode=yes \
             root@${ip} "true" 2>/dev/null; then
             ssh_ok=true
@@ -255,7 +255,7 @@ Host ${NODE_HOSTNAMES[$i]}
 EOF
 done
 
-sed -i "s|IDENTITY_FILE_PLACEHOLDER|${REPO_ROOT}/run/ssh-keys/id_rsa|" "${SSH_CONFIG}"
+sed -i "s|IDENTITY_FILE_PLACEHOLDER|${REPO_ROOT}/run/ssh-keys/id_ed25519|" "${SSH_CONFIG}"
 pass "SSH config written to ${SSH_CONFIG}"
 
 echo ""

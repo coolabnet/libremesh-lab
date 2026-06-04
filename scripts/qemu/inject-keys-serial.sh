@@ -10,7 +10,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SSH_KEY_DIR="${REPO_ROOT}/run/ssh-keys"
-SSH_KEY="${SSH_KEY_DIR}/id_rsa"
+SSH_KEY="${SSH_KEY_DIR}/id_ed25519"
 SERIAL_BASE="/tmp/node"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -23,7 +23,12 @@ if [ ! -f "${SSH_KEY}.pub" ]; then
     exit 1
 fi
 
-PUBLIC_KEY=$(cat "${SSH_KEY}.pub")
+# Base64-encode the key for safe transport over the serial console. The
+# base64 alphabet ([A-Za-z0-9+/=]) contains no shell metacharacters, so it
+# is safe to embed in single-quoted remote shell commands. Without this, a
+# crafted key with shell metacharacters in the comment could break out of
+# the single-quoted echo command and execute arbitrary commands on the VM.
+PUBLIC_KEY_B64=$(base64 -w 0 "${SSH_KEY}.pub")
 
 # Send a command to a VM via serial console and wait for response
 send_serial() {
@@ -59,11 +64,11 @@ for node_id in 1 2 3 4; do
 
     # Create .ssh directory and inject key
     send_serial "${sock}" "mkdir -p /root/.ssh && chmod 700 /root/.ssh" 1 >/dev/null
-    send_serial "${sock}" "echo '${PUBLIC_KEY}' > /root/.ssh/authorized_keys" 1 >/dev/null
+    send_serial "${sock}" "echo '${PUBLIC_KEY_B64}' | base64 -d > /root/.ssh/authorized_keys" 1 >/dev/null
     send_serial "${sock}" "chmod 600 /root/.ssh/authorized_keys" 1 >/dev/null
 
     # Also inject into dropbear authorized_keys
-    send_serial "${sock}" "echo '${PUBLIC_KEY}' > /etc/dropbear/authorized_keys" 1 >/dev/null
+    send_serial "${sock}" "echo '${PUBLIC_KEY_B64}' | base64 -d > /etc/dropbear/authorized_keys" 1 >/dev/null
     send_serial "${sock}" "chmod 600 /etc/dropbear/authorized_keys" 1 >/dev/null
 
     # Clear root password
@@ -87,7 +92,7 @@ echo "SSH key injection complete. Testing key auth..."
 # Test key auth
 for ip in 10.99.0.11 10.99.0.12 10.99.0.13 10.99.0.14; do
     if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-        -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedKeyTypes=+ssh-rsa \
+        -o HostKeyAlgorithms=+ssh-rsa \
         -o BatchMode=yes -i "${SSH_KEY}" \
         -o ConnectTimeout=3 "root@${ip}" "hostname" 2>/dev/null; then
         echo "  ${ip}: OK"

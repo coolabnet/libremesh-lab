@@ -12,7 +12,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${REPO_ROOT}/run"
 TOPOLOGY_FILE="${REPO_ROOT}/config/topology.yaml"
 SSH_KEY_DIR="${RUN_DIR}/ssh-keys"
-SSH_KEY="${SSH_KEY_DIR}/id_rsa"
+SSH_KEY="${SSH_KEY_DIR}/id_ed25519"
 
 # Timeout multiplier for TCG mode
 TIMEOUT_MULTIPLIER="${QEMU_TIMEOUT_MULTIPLIER:-1}"
@@ -31,6 +31,7 @@ VWIFI_TCP_PORT="8212"
 VWIFI_RADIOS="1"
 VWIFI_SSID="MeshaTestBed"
 VWIFI_FREQ="2462"
+BRIDGE_NAME="mesha-br0"
 
 # ─── Parse topology ───
 parse_topology() {
@@ -78,6 +79,38 @@ verify_vwifi_server() {
     return 1
 }
 
+# Start (or restart) the mesh routing daemon on a single VM, using whichever
+# interfaces are present. Used twice: once on the initial configure pass and
+# again as a re-verify step for bare-OpenWrt nodes where the daemon was
+# started before wlan0 came up. Aligns the babeld invocation form with
+# tests/qemu/common.sh:restart_mesh_protocol (-I /var/run/babeld.pid) so
+# the lab and test paths produce equivalent processes.
+#
+# Args:
+#   $1 — VM IP
+#   $2 — mesh protocol: bmx7 | babeld
+start_mesh_daemon_on_vm() {
+    local ip="$1"
+    local proto="$2"
+    [ -n "${proto}" ] || return 0
+    ssh_vm "$ip" "
+        killall ${proto} 2>/dev/null || true
+        if iw dev wlan0 info >/dev/null 2>&1; then
+            case '${proto}' in
+                babeld) babeld -D -I /var/run/babeld.pid wlan0 br-lan 2>&1 \
+                            || babeld -D -I /var/run/babeld.pid br-lan 2>&1 || true ;;
+                bmx7)   bmx7 dev=wlan0 dev=br-lan 2>&1 \
+                            || bmx7 dev=br-lan 2>&1 || true ;;
+            esac
+        else
+            case '${proto}' in
+                babeld) babeld -D -I /var/run/babeld.pid br-lan 2>&1 || true ;;
+                bmx7)   bmx7 dev=br-lan 2>&1 || true ;;
+            esac
+        fi
+    " || true
+}
+
 # ─── SSH helper ───
 # Tries key auth first (if SSH key exists), falls back to password auth.
 # This makes the script work with both source-built (pre-baked keys) and
@@ -91,7 +124,6 @@ ssh_vm() {
         ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o HostKeyAlgorithms=+ssh-rsa \
-            -o PubkeyAcceptedKeyTypes=+ssh-rsa \
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
             -i "${SSH_KEY}" \
@@ -100,24 +132,25 @@ ssh_vm() {
     fi
 
     # Fallback: password auth via sshpass (empty password for source-built images)
+    # Use PreferredAuthentications=password to avoid "none" auth masking key issues
     if command -v sshpass >/dev/null 2>&1; then
         sshpass -p "" ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o HostKeyAlgorithms=+ssh-rsa \
-            -o PubkeyAcceptedKeyTypes=+ssh-rsa \
+            -o PreferredAuthentications=password \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
             "root@${ip}" "$@" 2>/dev/null && return 0
     fi
 
-    # Last resort: try without key (for prebuilt images with password)
-    # Use NumberOfPasswordPrompts=0 to avoid hanging on interactive prompt
-    sshpass -p "root" ssh -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o HostKeyAlgorithms=+ssh-rsa \
-        -o PubkeyAcceptedKeyTypes=+ssh-rsa \
-        -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-        -o NumberOfPasswordPrompts=0 \
-        "root@${ip}" "$@" 2>/dev/null && return 0
+    # Last resort: try with password "root" (for prebuilt images)
+    if command -v sshpass >/dev/null 2>&1; then
+        sshpass -p "root" ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o HostKeyAlgorithms=+ssh-rsa \
+            -o PreferredAuthentications=password \
+            -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
+            "root@${ip}" "$@" 2>/dev/null && return 0
+    fi
 
     return 1
 }
@@ -127,10 +160,9 @@ ssh_vm_with_key() {
     shift
     ssh -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
-        -o HostKeyAlgorithms=+ssh-rsa \
-        -o PubkeyAcceptedKeyTypes=+ssh-rsa \
         -o BatchMode=yes \
         -o IdentitiesOnly=yes \
+        -o PreferredAuthentications=publickey \
         -i "${SSH_KEY}" \
         -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
         "root@${ip}" "$@"
@@ -213,7 +245,11 @@ configure_vm() {
             uci set lime-community.wifi.mode='adhoc'
             uci set lime-community.wifi.channel='11'
             uci get lime-community.network >/dev/null 2>&1 || uci set lime-community.network=lime
-            uci set lime-community.network.protocols='bmx7'
+            # babeld first to match the babeld-first detection in
+            # the bare-OpenWrt branch below (see the detection block above in
+            # the else-branch of the has_lime_config check).
+            # bmx7 is kept as a fallback for pre-babeld images.
+            uci set lime-community.network.protocols='babeld bmx7'
             uci set lime-community.network.domain='testbed.mesh'
             uci get lime-community.system >/dev/null 2>&1 || uci set lime-community.system=lime
             uci set lime-community.system.community_name='Mesha-Testbed'
@@ -243,7 +279,18 @@ configure_vm() {
             wifi up
         " || echo "  [${hostname}] WARN: lime-config sequence had errors"
     else
-        echo "  [${hostname}] Bare OpenWrt detected (no lime-config), configuring bmx7 directly..."
+        echo "  [${hostname}] Bare OpenWrt detected (no lime-config), configuring mesh routing directly..."
+
+        # Detect available routing protocol. Order matches
+        # tests/qemu/common.sh:detect_mesh_protocol and the unstaged
+        # default: babeld > bmx7. (Pre-babeld images may still ship bmx7;
+        # we keep the bmx7 branch as a fallback.)
+        local mesh_proto="none"
+        if ssh_vm "$ip" "which babeld >/dev/null 2>&1" 2>/dev/null; then
+            mesh_proto="babeld"
+        elif ssh_vm "$ip" "which bmx7 >/dev/null 2>&1" 2>/dev/null; then
+            mesh_proto="bmx7"
+        fi
 
         # Start vwifi-client if vwifi is installed.
         # vwifi-client --number N creates PHY radios via mac80211_hwsim netlink,
@@ -286,7 +333,7 @@ configure_vm() {
 
         # Check if wlan0 was created
         local has_wlan=false
-        ssh_vm "$ip" "iw dev wlan0 info >/dev/null 2>&1 && echo yes || echo no" 2>/dev/null | grep -q yes && has_wlan=true
+        ssh_vm "$ip" "iw dev wlan0 info >/dev/null 2>&1 && echo yes || echo no" 2>/dev/null | grep -q yes && has_wlan=true || true
 
         if ${has_wlan}; then
             echo "  [${hostname}] wlan0 created via vwifi, configuring IBSS mesh..."
@@ -301,36 +348,30 @@ configure_vm() {
             echo "  [${hostname}] WARN: wlan0 not available, using wired br-lan fallback"
         fi
 
-        # Configure and start bmx7.
+        # Configure and start mesh routing protocol.
         # Use BOTH wlan0 and br-lan when wlan0 is available:
         #   - wlan0 provides the WiFi/IBSS simulation for adapter testing
-        #   - br-lan ensures BMX7 convergence (vwifi IBSS forwards beacons
-        #     but not data frames, so OGMs need the wired path)
-        ssh_vm "$ip" "
-            killall bmx7 2>/dev/null || true
-            if iw dev wlan0 info >/dev/null 2>&1; then
-                bmx7 dev=wlan0 dev=br-lan 2>&1 || bmx7 dev=br-lan 2>&1 || true
-            else
-                bmx7 dev=br-lan 2>&1 || true
-            fi
-        " || true
+        #   - br-lan ensures convergence (vwifi IBSS forwards beacons
+        #     but not data frames, so routing protocol needs the wired path)
+        # start_mesh_daemon_on_vm (defined below) is reused by the
+        # re-verify block to avoid duplicating the kill/if-wlan0 dance.
+        case "${mesh_proto}" in
+            bmx7|babeld)
+                start_mesh_daemon_on_vm "$ip" "${mesh_proto}" || true
+                ;;
+            *)
+                echo "  [${hostname}] WARN: No mesh routing protocol found (bmx7/babeld)"
+                ;;
+        esac
     fi
 
-    # For LibreMesh: lime-config + wifi up already started bmx7 via proto-bmx7,
-    # so only ensure dual-interface mode for bare OpenWrt (where bmx7 was started
-    # in the else branch above but may not have picked up wlan0 if timing was off).
-    # For bare OpenWrt: re-verify bmx7 has both interfaces.
+    # For LibreMesh: lime-config + wifi up already started the routing daemon
+    # via its proto handler, so only ensure dual-interface mode for bare OpenWrt
+    # (where the daemon was started in the case branch above but may not have
+    # picked up wlan0 if timing was off).
+    # For bare OpenWrt: re-verify the routing daemon has both interfaces.
     if [[ "${has_lime_config}" != *"yes"* ]]; then
-        ssh_vm "$ip" "
-            if command -v bmx7 >/dev/null 2>&1; then
-                killall bmx7 2>/dev/null || true
-                if iw dev wlan0 info >/dev/null 2>&1; then
-                    bmx7 dev=wlan0 dev=br-lan 2>&1 || bmx7 dev=br-lan 2>&1 || true
-                else
-                    bmx7 dev=br-lan 2>&1 || true
-                fi
-            fi
-        " || true
+        start_mesh_daemon_on_vm "$ip" "${mesh_proto}" || true
     fi
 
     # Enable uhttpd
@@ -369,49 +410,120 @@ generate_and_inject_keys() {
 
     # Generate key pair if needed
     if [ ! -f "${SSH_KEY}" ]; then
-        echo "  Generating RSA SSH key pair (compatible with prebuilt dropbear)..."
-        ssh-keygen -t rsa -b 2048 -f "${SSH_KEY}" -N "" -C "mesha-testbed" >/dev/null
+        echo "  Generating ED25519 SSH key pair..."
+        ssh-keygen -t ed25519 -f "${SSH_KEY}" -N "" -C "mesha-testbed" >/dev/null
+    fi
+    # Always ensure the key has the right ownership and permissions if running
+    # under sudo. OpenSSH refuses to use a private key with anything other
+    # than 0600 (or 0640 with a restrictive group), so a key generated by
+    # root will be unusable by the invoking user without an explicit chmod.
+    # Apply this even for pre-existing keys — a previous run that left the
+    # key world-readable would otherwise be a silent failure.
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        # SUDO_GID is not exported by all sudo builds; fall back to the
+        # invoking user's primary group via `id -g` (resolves under set -u).
+        local sudo_gid="${SUDO_GID:-$(id -g "${SUDO_USER}")}"
+        chown "${SUDO_USER}:${sudo_gid}" "${SSH_KEY}" "${SSH_KEY}.pub"
+        chmod 600 "${SSH_KEY}"
+        chmod 644 "${SSH_KEY}.pub"
     fi
 
-    local public_key
-    public_key=$(cat "${SSH_KEY}.pub")
+    # Extract the key fingerprint (the base64-encoded key material) for the
+    # pre-bake check. We use this instead of grepping the full pubkey line so
+    # we don't have to interpolate untrusted key contents into a shell command
+    # (a crafted key with shell metacharacters in the comment could break out
+    # of the single-quoted grep pattern and execute arbitrary commands).
+    local key_fingerprint
+    key_fingerprint=$(awk '{print $2}' "${SSH_KEY}.pub")
 
     local idx=0
     for ip in "${NODE_IPS[@]}"; do
         local hostname="${NODE_HOSTNAMES[$idx]}"
 
-        # Check if key is already present (pre-baked by prepare-source-image.sh)
-        if ssh_vm "$ip" "grep -qF '$(echo "${public_key}" | awk '{print $2}')' /root/.ssh/authorized_keys 2>/dev/null" &>/dev/null; then
-            echo "  [${hostname}] SSH key already present (pre-baked), skipping injection."
-            # Still lock down dropbear for consistency
-            ssh_vm "$ip" "
-                uci set dropbear.@dropbear[0].PasswordAuth='off'
-                uci set dropbear.@dropbear[0].RootPasswordAuth='off'
-                uci commit dropbear
-                service dropbear restart
-            " 2>/dev/null || echo "  [${hostname}] WARN: Could not lock dropbear"
+        # Check if key is already present (pre-baked by prepare-source-image.sh).
+        # The fingerprint is an alphanumeric hex digest (e.g. SHA256:abc...);
+        # it contains no shell metacharacters and is safe to embed inline.
+        if ssh_vm "$ip" "grep -qF '${key_fingerprint}' /root/.ssh/authorized_keys 2>/dev/null" &>/dev/null; then
+            echo "  [${hostname}] SSH key already present (pre-baked)."
+            # Lock down dropbear even when the key is pre-baked — the old
+            # code always disabled password auth after key injection, and
+            # skipping it here leaves blank-password root login enabled.
+            if ssh_vm_with_key "$ip" "echo ok" &>/dev/null; then
+                ssh_vm "$ip" "
+                    uci set dropbear.@dropbear[0].PasswordAuth='off'
+                    uci set dropbear.@dropbear[0].RootPasswordAuth='off'
+                    uci commit dropbear
+                    service dropbear restart
+                " 2>/dev/null || echo "  [${hostname}] WARN: Could not lock dropbear"
+                echo "  [${hostname}] Password auth disabled."
+            else
+                echo "  [${hostname}] WARN: Pre-baked key auth failed; keeping password auth enabled."
+            fi
             idx=$((idx + 1))
             continue
         fi
 
         echo "  [${hostname}] Injecting SSH key..."
 
-        # Inject public key
-        ssh_vm "$ip" "mkdir -p /root/.ssh && echo '${public_key}' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && chmod 700 /root/.ssh" || {
+        # Inject public key to both locations dropbear checks:
+        # /root/.ssh/authorized_keys (standard) and /etc/dropbear/authorized_keys (OpenWrt fallback).
+        # The key is sent over the SSH channel as stdin (NOT embedded in the
+        # remote command), so crafted key comments or base64 content cannot
+        # break out of shell quoting on the VM.
+        local injected=false
+        # Try key-based auth first (source-built images with pre-baked keys).
+        if [[ -f "${SSH_KEY}" ]]; then
+            ssh -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o BatchMode=yes \
+                -o IdentitiesOnly=yes \
+                -i "${SSH_KEY}" \
+                -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
+                "root@${ip}" \
+                "mkdir -p /root/.ssh /etc/dropbear && cat >> /root/.ssh/authorized_keys && cp /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 700 /root/.ssh" \
+                < "${SSH_KEY}.pub" 2>/dev/null && injected=true
+        fi
+        # Fallback: password auth via sshpass (prebuilt images without keys yet).
+        if ! $injected && command -v sshpass >/dev/null 2>&1; then
+            sshpass -p "" ssh -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o PreferredAuthentications=password \
+                -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
+                "root@${ip}" \
+                "mkdir -p /root/.ssh /etc/dropbear && cat >> /root/.ssh/authorized_keys && cp /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 700 /root/.ssh" \
+                < "${SSH_KEY}.pub" 2>/dev/null && injected=true
+        fi
+        if ! $injected && command -v sshpass >/dev/null 2>&1; then
+            sshpass -p "root" ssh -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o PreferredAuthentications=password \
+                -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
+                "root@${ip}" \
+                "mkdir -p /root/.ssh /etc/dropbear && cat >> /root/.ssh/authorized_keys && cp /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 700 /root/.ssh" \
+                < "${SSH_KEY}.pub" 2>/dev/null && injected=true
+        fi
+        if $injected; then
+            :
+        else
             echo "  [${hostname}] WARN: Key injection failed"
             idx=$((idx + 1))
             continue
-        }
+        fi
 
-        # Lock down dropbear to key-only auth
-        ssh_vm "$ip" "
-            uci set dropbear.@dropbear[0].PasswordAuth='off'
-            uci set dropbear.@dropbear[0].RootPasswordAuth='off'
-            uci commit dropbear
-            service dropbear restart
-        " || echo "  [${hostname}] WARN: Could not lock dropbear"
-
-        echo "  [${hostname}] Key injected, password auth disabled."
+        # Verify key auth works before disabling password auth
+        if ssh_vm_with_key "$ip" "echo ok" &>/dev/null; then
+            echo "  [${hostname}] Key auth verified, disabling password auth."
+            ssh_vm "$ip" "
+                uci set dropbear.@dropbear[0].PasswordAuth='off'
+                uci set dropbear.@dropbear[0].RootPasswordAuth='off'
+                uci commit dropbear
+                service dropbear restart
+            " 2>/dev/null || echo "  [${hostname}] WARN: Could not lock dropbear"
+            echo "  [${hostname}] Key injected, password auth disabled."
+        else
+            echo "  [${hostname}] WARN: Key auth verification failed, keeping password auth enabled."
+            echo "  [${hostname}] Key injected but password auth still on."
+        fi
         idx=$((idx + 1))
     done
 }
@@ -444,6 +556,57 @@ main() {
 
     parse_topology
     verify_vwifi_server || true
+
+    # Phase -1: Reconfigure VM IPs if LibreMesh auto-assigned wrong subnet
+    # LibreMesh images auto-configure 10.13.x.x; we need 10.99.0.x
+    echo "=== Phase -1: Detecting VM IP configuration ==="
+    local need_ip_fix=false
+    for ip in "${NODE_IPS[@]}"; do
+        if ! ssh_vm "$ip" "echo ok" &>/dev/null; then
+            need_ip_fix=true
+            break
+        fi
+    done
+
+    if ${need_ip_fix}; then
+        echo "  VMs not reachable at expected IPs, trying IPv6 link-local reconfiguration..."
+        local idx=0
+        for ip in "${NODE_IPS[@]}"; do
+            local hostname="${NODE_HOSTNAMES[$idx]}"
+            local mac="${NODE_MACS[$idx]}"
+            # Derive IPv6 link-local from MAC using EUI-64
+            # Flip bit 6 (0x02) of first octet, insert FF:FE in middle
+            # MAC format: XX:XX:XX:XX:XX:XX (positions 0,3,6,9,12,15)
+            if [[ ! "${mac}" =~ ^([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})$ ]]; then
+                echo "  [${hostname}] WARN: bad MAC '${mac}', skipping EUI-64 derivation"
+                idx=$((idx + 1))
+                continue
+            fi
+            local m1="${BASH_REMATCH[1]}"
+            local m2="${BASH_REMATCH[2]}"
+            local m3="${BASH_REMATCH[3]}"
+            local m4="${BASH_REMATCH[4]}"
+            local m5="${BASH_REMATCH[5]}"
+            local m6="${BASH_REMATCH[6]}"
+            local m1_flipped
+            m1_flipped=$(printf '%02x' "$(( 0x${m1} ^ 0x02 ))")
+            local eui64="${m1_flipped}${m2}:${m3}ff:fe${m4}:${m5}${m6}"
+            local ipv6_ll="fe80::${eui64}"
+            echo -n "  [${hostname}] Trying ${ipv6_ll}%${BRIDGE_NAME}... "
+            if timeout 5 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o ConnectTimeout=3 "root@${ipv6_ll}%${BRIDGE_NAME}" \
+                "uci set network.lan.proto='static' && uci set network.lan.ipaddr='${ip}' && uci set network.lan.netmask='255.255.0.0' && uci set network.lan.gateway='10.99.0.254' && uci commit network && ip addr replace ${ip}/16 dev br-lan" 2>/dev/null; then
+                echo "OK (IP set to ${ip})"
+            else
+                echo "FAILED"
+            fi
+            idx=$((idx + 1))
+        done
+        # Brief wait for network to settle
+        sleep 2
+    else
+        echo "  All VMs reachable at expected IPs."
+    fi
 
     # Phase 0: Wait for all VMs to be SSH-reachable
     echo "=== Phase 0: Waiting for VMs to boot ==="
@@ -490,26 +653,48 @@ main() {
     # Phase 2: SSH keys
     generate_and_inject_keys
 
-    # Phase 3: Mesh convergence (source-built images with bmx7)
+    # Phase 3: Mesh convergence
     echo ""
     echo "=== Phase 3: Mesh convergence ==="
-    local bmx7_available=false
-    # Check if bmx7 is available on the first node
-    if ssh_vm "${NODE_IPS[0]}" "which bmx7 >/dev/null 2>&1" 2>/dev/null; then
-        bmx7_available=true
+    local mesh_daemon="none"
+    # Detect which mesh routing daemon is available
+    if ssh_vm "${NODE_IPS[0]}" "which babeld >/dev/null 2>&1" 2>/dev/null; then
+        mesh_daemon="babeld"
+    elif ssh_vm "${NODE_IPS[0]}" "which bmx7 >/dev/null 2>&1" 2>/dev/null; then
+        mesh_daemon="bmx7"
     fi
 
-    if ${bmx7_available}; then
-        echo "  BMX7 detected — waiting for mesh convergence..."
+    if [[ "${mesh_daemon}" != "none" ]]; then
+        echo "  ${mesh_daemon} detected — waiting for mesh convergence..."
         local convergence_ok=true
         for ip in "${NODE_IPS[@]}"; do
             local expected_peers=$(( ${#NODE_IPS[@]} - 1 ))
             local attempt=0
             local max_attempts=18  # 90 seconds at 5s intervals
-            echo -n "  [${ip}] Waiting for ${expected_peers} BMX7 peers..."
+            echo -n "  [${ip}] Waiting for ${expected_peers} ${mesh_daemon} peers..."
             while [ $attempt -lt $max_attempts ]; do
                 local peer_count
-                peer_count=$(ssh_vm "$ip" "bmx7 -c originators 2>/dev/null | tail -n +2 | wc -l" 2>/dev/null || echo "0")
+                case "${mesh_daemon}" in
+                    bmx7)
+                        peer_count=$(ssh_vm "$ip" "bmx7 -c originators 2>/dev/null | tail -n +2 | wc -l" 2>/dev/null || echo "0")
+                        ;;
+                    babeld)
+                        # babeld has no built-in CLI for neighbour counts.
+                        # Check the daemon is alive via its UDP listener, then
+                        # count ARP table entries on mesh interfaces as a proxy
+                        # for discovered neighbours (same approach used by
+                        # common.sh:count_mesh_neighbors for babeld).
+                        peer_count=$(ssh_vm "$ip" "netstat -ulnp 2>/dev/null | grep -qc babeld || echo 0" 2>/dev/null || echo "0")
+                        if [[ "${peer_count}" -ge 1 ]]; then
+                            # grep -c returns exit 1 with no matches but still
+                            # prints 0; wc -l always exits 0. Avoid arithmetic
+                            # on multi-line values from the local || echo fallback.
+                            peer_count=$(ssh_vm "$ip" "grep 'br-lan\|wlan0' /proc/net/arp 2>/dev/null | wc -l" 2>/dev/null || echo "0")
+                            peer_count=$(echo "${peer_count}" | tr -d '[:space:]')
+                            peer_count=$((peer_count > 0 ? peer_count - 1 : 0))
+                        fi
+                        ;;
+                esac
                 peer_count=$(echo "$peer_count" | tr -d '[:space:]')
                 if [ "${peer_count}" -ge "${expected_peers}" ] 2>/dev/null; then
                     echo " OK (${peer_count} peers)"
@@ -530,7 +715,7 @@ main() {
             echo "  WARN: Mesh did not fully converge. Tests may still pass with partial connectivity."
         fi
     else
-        echo "  BMX7 not available (prebuilt image) — skipping mesh convergence."
+        echo "  No mesh routing daemon found (bmx7/babeld) — skipping mesh convergence."
     fi
 
     # Verification

@@ -2,6 +2,14 @@
 # Safe, non-mutating host preflight for future namespace/wmediumd tests.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAB_ROOT="${SCRIPT_DIR}/../.."
+
+# Include project bin/ in PATH so preflight finds wmediumd installed there
+export PATH="${LAB_ROOT}/bin:${PATH}"
+
+export LD_LIBRARY_PATH="${LAB_ROOT}/bin/lib:${LD_LIBRARY_PATH:-}"
+
 HWSIM_MODULE="${LIBREMESH_LAB_HWSIM_MODULE:-mac80211_hwsim}"
 SYS_MODULE_DIR="${LIBREMESH_LAB_SYS_MODULE_DIR:-/sys/module}"
 MODULES_DIR="${LIBREMESH_LAB_MODULES_DIR:-/lib/modules/$(uname -r)}"
@@ -20,6 +28,22 @@ check_command() {
     local name="$1"
     if command -v "${name}" >/dev/null 2>&1; then
         ok "${name}: $(command -v "${name}")"
+    else
+        missing "${name} not found in PATH"
+    fi
+}
+
+check_command_with_ld_library() {
+    local name="$1"
+    if command -v "${name}" >/dev/null 2>&1; then
+        # Also verify it can run (needed for static-linked or bundled binary
+        # that may be missing shared libraries at runtime). LD_LIBRARY_PATH
+        # is already exported at the top of this script, so no prefix needed.
+        if "${name}" -h >/dev/null 2>&1; then
+            ok "${name}: $(command -v "${name}") (runnable)"
+        else
+            ok "${name}: $(command -v "${name}") (found, but fails -h; may need LD_LIBRARY_PATH)"
+        fi
     else
         missing "${name} not found in PATH"
     fi
@@ -66,7 +90,7 @@ echo "This check does not create namespaces, load modules, or require root."
 
 check_command ip
 check_command iw
-check_command wmediumd
+check_command_with_ld_library wmediumd
 check_command modprobe
 check_command ping
 check_command timeout

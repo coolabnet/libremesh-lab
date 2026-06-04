@@ -1,7 +1,7 @@
 Host lm-testbed-node-1
   HostName 10.99.0.11
   User root
-  IdentityFile __REPO_ROOT__/run/ssh-keys/id_rsa
+  IdentityFile __REPO_ROOT__/run/ssh-keys/id_ed25519
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   LogLevel ERROR
@@ -9,7 +9,7 @@ Host lm-testbed-node-1
 Host lm-testbed-node-2
   HostName 10.99.0.12
   User root
-  IdentityFile __REPO_ROOT__/run/ssh-keys/id_rsa
+  IdentityFile __REPO_ROOT__/run/ssh-keys/id_ed25519
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   LogLevel ERROR
@@ -17,7 +17,7 @@ Host lm-testbed-node-2
 Host lm-testbed-node-3
   HostName 10.99.0.13
   User root
-  IdentityFile __REPO_ROOT__/run/ssh-keys/id_rsa
+  IdentityFile __REPO_ROOT__/run/ssh-keys/id_ed25519
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   LogLevel ERROR
@@ -25,15 +25,17 @@ Host lm-testbed-node-3
 Host lm-testbed-tester
   HostName 10.99.0.14
   User root
-  IdentityFile __REPO_ROOT__/run/ssh-keys/id_rsa
+  IdentityFile __REPO_ROOT__/run/ssh-keys/id_ed25519
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
   LogLevel ERROR
-
 Host *
   IdentitiesOnly yes
   ServerAliveInterval 10
   ServerAliveCountMax 3
   ConnectTimeout 30
+  # Keep ssh-rsa for backward compatibility with older OpenWrt/dropbear
+  # images that may still ship an RSA-only host key. The lab's internal
+  # ssh calls (configure-vms.sh, mesh-status.sh) use inline -F to a
+  # stripped config without this directive, so they are ed25519-strict.
   HostKeyAlgorithms +ssh-rsa
-  PubkeyAcceptedKeyTypes +ssh-rsa
