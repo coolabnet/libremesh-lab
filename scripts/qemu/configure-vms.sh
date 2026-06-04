@@ -442,22 +442,22 @@ generate_and_inject_keys() {
     # OpenSSH. Phase -1 may also call this before the normal injection phase.
     ensure_ssh_key
 
-    # Extract the key fingerprint (the base64-encoded key material) for the
+    # Extract the base64-encoded key material for the
     # pre-bake check. We use this instead of grepping the full pubkey line so
     # we don't have to interpolate untrusted key contents into a shell command
     # (a crafted key with shell metacharacters in the comment could break out
     # of the single-quoted grep pattern and execute arbitrary commands).
-    local key_fingerprint
-    key_fingerprint=$(awk '{print $2}' "${SSH_KEY}.pub")
+    local key_material
+    key_material=$(awk '{print $2}' "${SSH_KEY}.pub")
 
     local idx=0
     for ip in "${NODE_IPS[@]}"; do
         local hostname="${NODE_HOSTNAMES[$idx]}"
 
         # Check if key is already present (pre-baked by prepare-source-image.sh).
-        # The fingerprint is an alphanumeric hex digest (e.g. SHA256:abc...);
-        # it contains no shell metacharacters and is safe to embed inline.
-        if ssh_vm "$ip" "grep -qF '${key_fingerprint}' /root/.ssh/authorized_keys 2>/dev/null" &>/dev/null; then
+        # The key material is base64 and has no shell metacharacters, so it is
+        # safe to embed as a fixed grep pattern.
+        if ssh_vm "$ip" "grep -qF '${key_material}' /root/.ssh/authorized_keys 2>/dev/null" &>/dev/null; then
             echo "  [${hostname}] SSH key already present (pre-baked)."
             # Lock down dropbear even when the key is pre-baked — the old
             # code always disabled password auth after key injection, and
@@ -485,6 +485,8 @@ generate_and_inject_keys() {
         # remote command), so crafted key comments or base64 content cannot
         # break out of shell quoting on the VM.
         local injected=false
+        local target
+        target="$(ssh_target "${ip}")"
         # Try key-based auth first (source-built images with pre-baked keys).
         if [[ -f "${SSH_KEY}" ]]; then
             ssh -o StrictHostKeyChecking=no \
@@ -494,7 +496,7 @@ generate_and_inject_keys() {
                 -o IdentitiesOnly=yes \
                 -i "${SSH_KEY}" \
                 -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-                "root@${ip}" \
+                "${target}" \
                 "mkdir -p /root/.ssh /etc/dropbear && cat >> /root/.ssh/authorized_keys && cp /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 700 /root/.ssh" \
                 < "${SSH_KEY}.pub" 2>/dev/null && injected=true
         fi
@@ -505,7 +507,7 @@ generate_and_inject_keys() {
                 -o HostKeyAlgorithms=+ssh-rsa \
                 -o PreferredAuthentications=password \
                 -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-                "root@${ip}" \
+                "${target}" \
                 "mkdir -p /root/.ssh /etc/dropbear && cat >> /root/.ssh/authorized_keys && cp /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 700 /root/.ssh" \
                 < "${SSH_KEY}.pub" 2>/dev/null && injected=true
         fi
@@ -515,7 +517,7 @@ generate_and_inject_keys() {
                 -o HostKeyAlgorithms=+ssh-rsa \
                 -o PreferredAuthentications=password \
                 -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-                "root@${ip}" \
+                "${target}" \
                 "mkdir -p /root/.ssh /etc/dropbear && cat >> /root/.ssh/authorized_keys && cp /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 600 /root/.ssh/authorized_keys /etc/dropbear/authorized_keys && chmod 700 /root/.ssh" \
                 < "${SSH_KEY}.pub" 2>/dev/null && injected=true
         fi
@@ -573,6 +575,7 @@ main() {
 
     parse_topology
     verify_vwifi_server || true
+    ensure_ssh_key
 
     # Phase -1: Reconfigure VM IPs if LibreMesh auto-assigned wrong subnet
     # LibreMesh images auto-configure 10.13.x.x; we need 10.99.0.x
@@ -587,7 +590,6 @@ main() {
 
     if ${need_ip_fix}; then
         echo "  VMs not reachable at expected IPs, trying IPv6 link-local reconfiguration..."
-        ensure_ssh_key
         local idx=0
         for ip in "${NODE_IPS[@]}"; do
             local hostname="${NODE_HOSTNAMES[$idx]}"
