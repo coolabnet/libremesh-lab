@@ -12,7 +12,7 @@
 # Options:
 #   -h, --help          — Show this help text
 #   --image <path>      — Source-built image path (default: auto-detect)
-#   --ssh-key <path>    — SSH public key (default: run/ssh-keys/id_rsa.pub)
+#   --ssh-key <path>    — SSH public key (default: run/ssh-keys/id_ed25519.pub)
 #
 # This script is the source-built equivalent of convert-prebuilt.sh.
 # It must be run once after building the image with build-libremesh-image.sh.
@@ -28,18 +28,35 @@ show_help() {
 IMAGE_PATH=""
 SSH_KEY_PATH=""
 
-for arg in "$@"; do
-    case "$arg" in
+# IMPORTANT: this must be a while loop with explicit shifts. The previous
+# `for arg in "$@"; shift; ...` pattern was broken: `for` iterates over the
+# original argument list (so `shift` inside the loop body had no effect on
+# the next iteration), and `--image foo` was parsed as two separate cases,
+# with `foo` falling through silently.
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         -h|--help) show_help ;;
         --image)
-            shift
-            IMAGE_PATH="${1:-}"
-            [[ -z "${IMAGE_PATH}" ]] && { echo "[ERROR] --image requires a value" >&2; exit 1; }
+            [[ $# -ge 2 ]] || { echo "[ERROR] --image requires a value" >&2; exit 1; }
+            IMAGE_PATH="$2"
+            shift 2
             ;;
         --ssh-key)
+            [[ $# -ge 2 ]] || { echo "[ERROR] --ssh-key requires a value" >&2; exit 1; }
+            SSH_KEY_PATH="$2"
+            shift 2
+            ;;
+        --)
             shift
-            SSH_KEY_PATH="${1:-}"
-            [[ -z "${SSH_KEY_PATH}" ]] && { echo "[ERROR] --ssh-key requires a value" >&2; exit 1; }
+            break
+            ;;
+        -*)
+            echo "[ERROR] Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            echo "[ERROR] Unexpected positional argument: $1" >&2
+            exit 1
             ;;
     esac
 done
@@ -60,7 +77,7 @@ fi
 
 IMAGE_DIR="${REPO_ROOT}/images"
 IMAGE_PATH="${IMAGE_PATH:-${IMAGE_DIR}/libremesh-x86-64-source-built.img}"
-SSH_KEY_PATH="${SSH_KEY_PATH:-${REPO_ROOT}/run/ssh-keys/id_rsa.pub}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-${REPO_ROOT}/run/ssh-keys/id_ed25519.pub}"
 
 # ─── Helpers ────────────────────────────────────────────────────────────────────
 log() { echo "[configure-source] $*"; }
@@ -95,11 +112,23 @@ log "Analyzing image format of ${IMAGE_PATH}..."
 IS_FLAT=false
 if file -L "${IMAGE_PATH}" | grep -q "DOS/MBR boot sector"; then
     # Combined image with partition table
-    PART2_START=$(fdisk -l "${IMAGE_PATH}" 2>/dev/null | awk '
-        /^\/dev/ && $1 ~ /2$/ {
-            print $2
-        }
-    ')
+    # fdisk output varies: /dev/loop0p2 when using loop devices,
+    # or images/file.img2 when run on a plain file. The '2' at the end of
+    # the device field must be partition 2, not a higher-numbered partition
+    # like loop0p12 — anchor with non-digit prefix.
+    #
+    # util-linux fdisk column layout has changed across versions:
+    #   Old (pre-2.38): Boot StartCHS EndCHS StartLBA EndLBA ...
+    #   New (≥2.38):    Boot StartLBA EndLBA Sectors Size Id Type
+    # In both layouts, the first purely-numeric field after the device
+    # is the partition's start sector (LBA). Old fdisk's StartCHS is
+    # comma-separated (e.g. "0,32,33") and is therefore skipped; its
+    # StartLBA (the next field) is what we want. New fdisk puts the start
+    # LBA in $3 directly. This logic is exercised by
+    # tests/qemu/test-qemu-script-units.sh against both formats.
+    PART2_START=$(fdisk -l "${IMAGE_PATH}" 2>/dev/null \
+        | awk -f "${SCRIPT_DIR}/parse-fdisk-partition.awk" \
+        | tail -1)
 
     if [[ -z "${PART2_START}" ]]; then
         die "Could not find partition 2 (rootfs) in ${IMAGE_PATH}. Is this a source-built combined image?"
@@ -185,6 +214,34 @@ if [[ -f "${MOUNT_POINT}/etc/config/dropbear" ]]; then
         sudo sed -i "/RootLogin:bool:1/a\\t\t'BlankPasswordAuth:bool:0' \\\\" "${DROPBEAR_INIT}"
         log "  Patched dropbear init script with -B (blank password) support"
     fi
+fi
+
+# ─── Ensure /sbin/service shim is present (needed by mesha adapters) ──────────
+# OpenWrt doesn't ship a SysV-style `service` command; mesha adapters and some
+# testbed helpers shell out to `service <name> <action>`. Inject a minimal
+# shim that maps to /etc/init.d/<name> <action>.
+SERVICE_SHIM="${MOUNT_POINT}/sbin/service"
+if ! sudo head -1 "${SERVICE_SHIM}" 2>/dev/null | grep -q 'service shim'; then
+    sudo mkdir -p "${MOUNT_POINT}/sbin"
+    sudo tee "${SERVICE_SHIM}" >/dev/null <<'SERVICEEOF'
+#!/bin/sh
+# /sbin/service shim for OpenWrt — maps `service <name> <action>` to
+# `/etc/init.d/<name> <action>`. Used by mesha adapters and similar tools.
+if [ $# -lt 2 ]; then
+    echo "Usage: service <name> <action> [args...]" >&2
+    exit 64
+fi
+NAME="$1"
+shift
+INITD="/etc/init.d/${NAME}"
+if [ ! -x "${INITD}" ]; then
+    echo "service: ${NAME} not found (no ${INITD})" >&2
+    exit 5
+fi
+exec "${INITD}" "$@"
+SERVICEEOF
+    sudo chmod +x "${SERVICE_SHIM}"
+    log "  /sbin/service shim created"
 fi
 
 # ─── Done ───────────────────────────────────────────────────────────────────────
