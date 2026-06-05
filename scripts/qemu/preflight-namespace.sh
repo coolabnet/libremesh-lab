@@ -48,7 +48,6 @@ check_command_with_ld_library() {
         missing "${name} not found in PATH"
     fi
 }
-
 check_namespace_tool() {
     if command -v ip >/dev/null 2>&1 && ip netns list >/dev/null 2>&1; then
         ok "namespace tool: ip netns"
