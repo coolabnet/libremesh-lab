@@ -15,7 +15,7 @@ lab_topology_load "${TOPOLOGY_FILE}"
 
 # Scoped tokens to avoid killing unrelated host processes on shared hosts.
 # Must match the tokens used in rollback-lab.sh.
-LAB_SCOPE_TOKENS=("mesha-" "${BRIDGE_NAME}" "${TAP_PREFIX}" "${REPO_ROOT}/run")
+LAB_SCOPE_TOKENS=("mesha-" "${BRIDGE_NAME}" "${TAP_PREFIX}" "${REPO_ROOT}/run" "${REPO_ROOT}/bin")
 
 echo "=========================================="
 echo " LibreMesh Lab Teardown"

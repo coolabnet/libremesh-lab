@@ -28,7 +28,8 @@ NODE_COUNT=4
 # hosts where other QEMU VMs, vwifi instances, or dnsmasq servers may be
 # running. We only target processes that reference one of these tokens in
 # their cmdline — that way `pgrep -f` cannot hit unrelated host services.
-LAB_SCOPE_TOKENS=("mesha-" "${BRIDGE_NAME}" "${TAP_PREFIX}" "${LAB_ROOT}/run")
+# Include LAB_ROOT/bin so vwifi-server (installed there) is matched.
+LAB_SCOPE_TOKENS=("mesha-" "${BRIDGE_NAME}" "${TAP_PREFIX}" "${LAB_ROOT}/run" "${LAB_ROOT}/bin")
 
 ORIGINAL_ARGS=("$@")
 FULL_UNDO=false
