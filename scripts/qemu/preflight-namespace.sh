@@ -42,7 +42,7 @@ check_command_with_ld_library() {
         if "${name}" -h >/dev/null 2>&1; then
             ok "${name}: $(command -v "${name}") (runnable)"
         else
-            ok "${name}: $(command -v "${name}") (found, but fails -h; may need LD_LIBRARY_PATH)"
+            missing "${name}: $(command -v "${name}") (found, but fails -h; may need LD_LIBRARY_PATH)"
         fi
     else
         missing "${name} not found in PATH"

@@ -13,6 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/topology.sh"
 lab_topology_load "${TOPOLOGY_FILE}"
 
+# Scoped tokens to avoid killing unrelated host processes on shared hosts.
+# Must match the tokens used in rollback-lab.sh.
+LAB_SCOPE_TOKENS=("mesha-" "${BRIDGE_NAME}" "${TAP_PREFIX}" "${REPO_ROOT}/run")
+
 echo "=========================================="
 echo " LibreMesh Lab Teardown"
 echo "=========================================="
@@ -23,7 +27,7 @@ if command -v ip >/dev/null 2>&1; then
     have_ip=1
 fi
 
-# ─── Kill processes from PID files ───
+# ─── Kill processes from PID files (with scope verification) ───
 echo ""
 echo "--- Stopping processes ---"
 
@@ -39,7 +43,25 @@ for pid_file in "${RUN_DIR}"/node-*.pid "${RUN_DIR}/vwifi-server.pid" "${RUN_DIR
         continue
     fi
 
+    # Verify process exists AND belongs to our lab scope (cmdline contains
+    # one of LAB_SCOPE_TOKENS). This prevents killing unrelated processes
+    # whose PIDs were recycled from stale PID files on shared hosts.
     if kill -0 "$pid" 2>/dev/null; then
+        cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)
+        scope_match=false
+        for token in "${LAB_SCOPE_TOKENS[@]}"; do
+            if [[ "${cmdline}" == *"${token}"* ]]; then
+                scope_match=true
+                break
+            fi
+        done
+        if [ "${scope_match}" = "false" ]; then
+            echo "  [${label}] PID ${pid} running but not lab-scoped (stale PID file), removing"
+            rm -f "$pid_file"
+            cleaned_something=1
+            continue
+        fi
+
         echo "  [${label}] Sending SIGTERM to PID ${pid}..."
         kill "$pid" 2>/dev/null || true
 
@@ -53,8 +75,21 @@ for pid_file in "${RUN_DIR}"/node-*.pid "${RUN_DIR}/vwifi-server.pid" "${RUN_DIR
 
         # Force kill if still running
         if kill -0 "$pid" 2>/dev/null; then
-            echo "  [${label}] Sending SIGKILL to PID ${pid}..."
-            kill -9 "$pid" 2>/dev/null || true
+            # Re-verify scope before SIGKILL (PID could have been reused)
+            cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)
+            scope_match=false
+            for token in "${LAB_SCOPE_TOKENS[@]}"; do
+                if [[ "${cmdline}" == *"${token}"* ]]; then
+                    scope_match=true
+                    break
+                fi
+            done
+            if [ "${scope_match}" = "true" ]; then
+                echo "  [${label}] Sending SIGKILL to PID ${pid}..."
+                kill -9 "$pid" 2>/dev/null || true
+            else
+                echo "  [${label}] PID ${pid} reused by unrelated process; skipping SIGKILL"
+            fi
         fi
         echo "  [${label}] Stopped."
     else

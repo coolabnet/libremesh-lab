@@ -37,7 +37,12 @@ elif command -v python3 >/dev/null 2>&1 && python3 -c pass 2>/dev/null; then
 elif command -v python >/dev/null 2>&1 && python -c pass 2>/dev/null; then
     PYTHON="python"
 else
-    PYTHON="python3"  # will fail loudly if missing
+    # Use /usr/bin/python3 as last resort to bypass pyenv shims
+    if [ -x /usr/bin/python3 ]; then
+        PYTHON="/usr/bin/python3"
+    else
+        PYTHON="python3"  # will fail loudly if missing
+    fi
 fi
 
 # thisnode.info resolution via HOSTALIASES
