@@ -4,6 +4,11 @@
 
 set -euo pipefail
 
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${REPO_ROOT}/run"
 LOG_DIR="${RUN_DIR}/logs"
@@ -17,7 +22,7 @@ BRIDGE_IP="10.99.0.254/16"
 TAP_PREFIX="mesha-tap"
 NODE_COUNT=4
 BASE_IMAGE="${REPO_ROOT}/images/libremesh-x86-64.ext4"
-KERNEL_IMAGE="${REPO_ROOT}/images/generic-kernel.bin"
+KERNEL_IMAGE="${REPO_ROOT}/images/generic-kernel.bin"  # Only needed for flat images without bootloader
 
 mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 
@@ -275,11 +280,13 @@ launch_vm() {
     fi
 
     echo "  [Node ${node_id}] Kernel: ${KERNEL_IMAGE} (exists=$([ -f "${KERNEL_IMAGE}" ] && echo yes || echo no)), HAS_BOOTLOADER=${HAS_BOOTLOADER}"
-    if [ -f "${KERNEL_IMAGE}" ] && [ "${HAS_BOOTLOADER}" = "false" ]; then
+    if [ "${HAS_BOOTLOADER}" = "true" ]; then
+        echo "  [Node ${node_id}] Booting from image directly (has bootloader)"
+    elif [ -f "${KERNEL_IMAGE}" ]; then
         KERNEL_OPTS+=(-kernel "${KERNEL_IMAGE}" -append "root=/dev/sda rootfstype=ext4 rootwait console=ttyS0")
         echo "  [Node ${node_id}] Using kernel boot"
     else
-        echo "  [Node ${node_id}] Booting from image directly"
+        die "Image has no bootloader and no kernel fallback (${KERNEL_IMAGE} missing). Re-run convert-prebuilt.sh or place a kernel at ${KERNEL_IMAGE}."
     fi
 
     # Add serial sockets for all nodes (needed for source-built image configuration)
@@ -287,6 +294,7 @@ launch_vm() {
 
     echo "  [Node ${node_id}] Launching QEMU..."
     if [[ ${#KERNEL_OPTS[@]} -gt 0 ]]; then
+        # shellcheck disable=SC2086
         qemu-system-x86_64 \
             ${ACCEL} \
             -M q35 \
@@ -303,6 +311,7 @@ launch_vm() {
             -serial "${serial_arg}" \
             &
     else
+        # shellcheck disable=SC2086
         qemu-system-x86_64 \
             ${ACCEL} \
             -M q35 \

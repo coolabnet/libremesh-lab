@@ -19,7 +19,7 @@ if [ "${RESULT_EXIT}" -ne 0 ] || [ -z "${RESULT}" ]; then
     pass "test_adapter_timeout_on_unreachable_node"
 else
     # Non-empty output is also acceptable if it indicates failure
-    if echo "${RESULT}" | python3 -c "
+    if echo "${RESULT}" | ${PYTHON} -c "
 import sys, json
 data = json.load(sys.stdin)
 assert data.get('reachable') is not True
@@ -65,10 +65,11 @@ for _i in $(seq 1 12); do
     sleep 5
 done
 if [ "${RECOVERED}" -eq 0 ]; then
-    echo "  # WARNING: node-3 did not recover in 60s; subsequent BMX7 tests may fail" >&2
+    echo "  # WARNING: node-3 did not recover in 60s; subsequent mesh tests may fail" >&2
 else
-    # Wait for BMX7 to reconverge with at least 2 peers visible from node-3
-    wait_for_bmx7 "lm-testbed-node-3" 2 60 || true
+    # Wait for the active mesh protocol to reconverge with at least 2
+    # peers visible from node-3.
+    wait_for_mesh "lm-testbed-node-3" 2 60 || true
 fi
 
 # Test 4: Adapter handles empty output gracefully

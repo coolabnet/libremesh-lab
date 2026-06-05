@@ -42,23 +42,23 @@ for TOPO_FILE in topology-line.yaml topology-star.yaml topology-partition.yaml; 
 
     # Wait for convergence
     GATEWAY=$(get_gateway)
-    BMX7_RESULT=0
-    wait_for_bmx7 "$GATEWAY" 2 120 || BMX7_RESULT=$?
+    MESH_RESULT=0
+    wait_for_mesh "$GATEWAY" 2 120 || MESH_RESULT=$?
 
-    if [ "${BMX7_RESULT}" -eq 0 ]; then
+    if [ "${MESH_RESULT}" -eq 0 ]; then
         # Verify topology shape
         TOPO=$(bash "${LAB_CLI}" run-adapter \
             "${MESHA_ROOT}/adapters/mesh/collect-topology.sh" "$GATEWAY" 2>/dev/null) || true
-        NODE_COUNT=$(echo "$TOPO" | python3 -c "import sys,json; print(json.load(sys.stdin).get('node_count',0))" 2>/dev/null || echo "0")
+        NODE_COUNT=$(echo "$TOPO" | ${PYTHON} -c "import sys,json; print(json.load(sys.stdin).get('node_count',0))" 2>/dev/null || echo "0")
         if [ "$NODE_COUNT" -ge 3 ]; then
             pass "test_${TOPO_NAME}_topology_converges"
         else
             fail "test_${TOPO_NAME}_topology_converges" "only ${NODE_COUNT} nodes found"
         fi
-    elif [ "${BMX7_RESULT}" -eq 2 ]; then
-        skip "test_${TOPO_NAME}_topology_converges" "BMX7 not installed"
+    elif [ "${MESH_RESULT}" -eq 2 ]; then
+        skip "test_${TOPO_NAME}_topology_converges" "no mesh protocol installed"
     else
-        skip "test_${TOPO_NAME}_topology_converges" "BMX7 did not converge in 120s"
+        skip "test_${TOPO_NAME}_topology_converges" "mesh did not converge in 120s"
     fi
 done
 

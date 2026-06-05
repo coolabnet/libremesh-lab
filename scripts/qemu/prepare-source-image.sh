@@ -18,7 +18,7 @@
 # Options:
 #   -h, --help          — Show this help text
 #   --image <path>      — Flat image path (default: auto-detect)
-#   --ssh-key <path>    — SSH public key (default: run/ssh-keys/id_rsa.pub)
+#   --ssh-key <path>    — SSH public key (default: run/ssh-keys/id_ed25519.pub)
 #   --force             — Re-prepare even if image appears already prepared
 
 set -euo pipefail
@@ -51,7 +51,7 @@ REPO_ROOT="$(cd "${REPO_ROOT}" && pwd)"
 
 IMAGE_DIR="${REPO_ROOT}/images"
 IMAGE_PATH="${IMAGE_PATH:-${IMAGE_DIR}/libremesh-x86-64-source-built-flat.img}"
-SSH_KEY_PATH="${SSH_KEY_PATH:-${REPO_ROOT}/run/ssh-keys/id_rsa.pub}"
+SSH_KEY_PATH="${SSH_KEY_PATH:-${REPO_ROOT}/run/ssh-keys/id_ed25519.pub}"
 SSH_KEY_DIR="${REPO_ROOT}/run/ssh-keys"
 
 # ─── Helpers ────────────────────────────────────────────────────────────────────
@@ -78,10 +78,10 @@ fi
 
 # ─── Generate SSH key pair if needed ────────────────────────────────────────────
 if [[ ! -f "${SSH_KEY_PATH}" ]]; then
-    log "SSH key not found, generating RSA key pair..."
+    log "SSH key not found, generating Ed25519 key pair..."
     mkdir -p "${SSH_KEY_DIR}"
-    ssh-keygen -t rsa -b 2048 -f "${SSH_KEY_DIR}/id_rsa" -N "" -C "mesha-testbed" >/dev/null
-    log "  Generated: ${SSH_KEY_DIR}/id_rsa"
+    ssh-keygen -t ed25519 -f "${SSH_KEY_DIR}/id_ed25519" -N "" -C "mesha-testbed" >/dev/null
+    log "  Generated: ${SSH_KEY_DIR}/id_ed25519"
 fi
 
 PUBLIC_KEY="$(cat "${SSH_KEY_PATH}")"
@@ -97,10 +97,10 @@ cleanup() {
     if [[ -n "${MOUNT_POINT}" ]] && [[ -d "${MOUNT_POINT}" ]]; then
         rmdir "${MOUNT_POINT}" 2>/dev/null || true
     fi
-    # Release loop device if we allocated one
-    if [[ -n "${LOOP_DEV:-}" ]] && [[ -e "${LOOP_DEV}" ]]; then
-        sudo losetup -d "${LOOP_DEV}" 2>/dev/null || true
-    fi
+    # Note: no LOOP_DEV cleanup here — the mount on line below uses
+    # `mount -o loop`, which lets the kernel manage the loop device
+    # internally. The loop is released automatically when the mount
+    # is unmounted.
 }
 trap cleanup EXIT
 

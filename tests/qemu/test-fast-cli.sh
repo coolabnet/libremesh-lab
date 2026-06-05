@@ -18,7 +18,7 @@ else
 fi
 
 STATUS_JSON_OK=false
-if echo "${STATUS_OUTPUT}" | python3 -m json.tool >/dev/null 2>&1; then
+if echo "${STATUS_OUTPUT}" | ${PYTHON} -m json.tool >/dev/null 2>&1; then
     STATUS_JSON_OK=true
     pass "test_status_outputs_json"
 else
@@ -26,7 +26,7 @@ else
 fi
 
 ACTIVE_LAB=false
-if "${STATUS_JSON_OK}" && echo "${STATUS_OUTPUT}" | python3 -c '
+if "${STATUS_JSON_OK}" && echo "${STATUS_OUTPUT}" | ${PYTHON} -c '
 import json, sys
 data = json.load(sys.stdin)
 active = data.get("bridge", {}).get("exists") or data.get("vwifi_server", {}).get("running")
@@ -41,7 +41,7 @@ if ! "${STATUS_JSON_OK}"; then
 elif "${ACTIVE_LAB}"; then
     skip "test_status_reports_all_vms_stopped_when_clean" "lab appears to be running"
 else
-    if echo "${STATUS_OUTPUT}" | python3 -c '
+    if echo "${STATUS_OUTPUT}" | ${PYTHON} -c '
 import json, sys
 data = json.load(sys.stdin)
 assert data.get("vm_count", 0) == len(data.get("vms", []))

@@ -30,10 +30,45 @@ keep these artifacts out of commits.
   preflight; use `sudo env RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite
   namespace` on an isolated host for the root-gated hwsim/wmediumd smoke.
 - `bin/libremesh-lab stop`: stop VMs and clean runtime networking state.
+- `sudo bin/rollback-lab.sh`: comprehensive undo — stops the lab, removes
+  TAP devices, the bridge, runtime state, and the testbed lock. Idempotent.
+  Use `--full` to also drop the passwordless sudo rule and remove
+  `bin/wmediumd` / `bin/lib/`. Use it as the safe teardown after a
+  `start` + `configure` + `test` session, especially on shared hosts.
+- `scripts/qemu/build-wmediumd.sh`: build a relocatable wmediumd binary
+  (with vendored libconfig) into `bin/wmediumd`. Defaults to a pinned
+  `WMEDIUMD_REF` SHA; override `WMEDIUMD_REPO` / `WMEDIUMD_REF` deliberately
+  when testing forks or upgrades.
 
-For a direct quick-start flow, use `sudo bin/libremesh-lab start`; it delegates
-to `scripts/qemu/start-mesh.sh`, which starts vwifi before booting VMs. Use the
-lower-level scripts in `docs/README.md` only when debugging an individual phase.
+## Workflow (full cycle)
+
+```
+# 1. Build or get an image (pick one)
+bin/libremesh-lab build-image          # source-built LibreMesh
+bash scripts/qemu/convert-prebuilt.sh  # prebuilt LibreRouterOS
+
+# 2. For source-built images only: install SSH keys + DHCP
+scripts/qemu/configure-source-image.sh --image images/libremesh-combined.img
+
+# 3. Start lab (root)
+sudo bin/libremesh-lab start           # → vwifi + 4 QEMU VMs on mesha-br0
+
+# 4. Configure VMs (wait ~90s after step 3 for boot)
+bin/libremesh-lab configure            # hostname, IP, mesh proto, SSH keys
+
+# 5. Run tests
+bin/libremesh-lab test                 # fast suite (no VMs needed)
+bin/libremesh-lab test --suite lab     # lab suite (needs VMs up)
+MESHA_ROOT=path bin/libremesh-lab test --suite adapter  # adapter suite
+
+# 6. Teardown
+sudo bin/rollback-lab.sh               # stop lab, kill processes, remove TAPs/bridge
+sudo bin/rollback-lab.sh --full        # also drop sudo rule + bin/wmediumd
+```
+
+`bin/libremesh-lab start` delegates to `scripts/qemu/start-mesh.sh` (starts vwifi before booting VMs).
+Use lower-level scripts under `scripts/qemu/` only when debugging a single phase.
+User-facing docs with full architecture and test descriptions: `docs/README.md`.
 
 ## Coding Style & Naming Conventions
 

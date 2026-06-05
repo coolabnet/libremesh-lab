@@ -28,7 +28,7 @@ if [ -z "${SYSTEM_SSH}" ]; then
   exit 1
 fi
 
-SSH_KEY="${SSH_KEY:-${RUN_DIR}/ssh-keys/id_rsa}"
+SSH_KEY="${SSH_KEY:-${RUN_DIR}/ssh-keys/id_ed25519}"
 SSH_CONFIG_TEMPLATE="${LAB_CONFIG}/ssh-config"
 SSH_CONFIG_RESOLVED="${LAB_CONFIG}/ssh-config.resolved"
 

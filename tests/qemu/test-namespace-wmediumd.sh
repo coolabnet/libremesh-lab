@@ -5,6 +5,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
+LAB_ROOT="${SCRIPT_DIR}/../.."
+# Set LD_LIBRARY_PATH so bundled wmediumd finds libconfig
+export LD_LIBRARY_PATH="${LAB_ROOT}/bin/lib:${LD_LIBRARY_PATH:-}"
+# Prefer project-bundled wmediumd over system wmediumd
+WMEDIUMD="${LAB_ROOT}/bin/wmediumd"
+
 echo "# Namespace Wmediumd Tests"
 tap_plan 5
 
@@ -62,11 +68,14 @@ require_root_and_tools() {
     fi
 
     local missing_tools=""
-    for tool in ip iw modprobe wmediumd ping timeout awk find readlink; do
+    for tool in ip iw modprobe ping timeout awk find readlink; do
         if ! command -v "${tool}" >/dev/null 2>&1; then
             missing_tools="${missing_tools} ${tool}"
         fi
     done
+    if [ ! -x "${WMEDIUMD}" ]; then
+        missing_tools="${missing_tools} wmediumd"
+    fi
     if [ -n "${missing_tools}" ]; then
         fail "test_namespace_has_required_tools" "missing:${missing_tools}"
         tap_summary
@@ -189,7 +198,7 @@ configure_mesh_interfaces() {
 
 start_wmediumd() {
     write_wmediumd_config
-    wmediumd -c "${TMP_DIR}/wmediumd.cfg" > "${TMP_DIR}/wmediumd.log" 2>&1 &
+    "${WMEDIUMD}" -c "${TMP_DIR}/wmediumd.cfg" > "${TMP_DIR}/wmediumd.log" 2>&1 &
     WMEDIUMD_PID="$!"
     sleep 1
     if kill -0 "${WMEDIUMD_PID}" >/dev/null 2>&1; then

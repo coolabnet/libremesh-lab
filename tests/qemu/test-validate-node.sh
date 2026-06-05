@@ -11,11 +11,10 @@ tap_plan 3
 GATEWAY=$(get_gateway)
 NODE2="lm-testbed-node-2"
 CLEANUP_DONE=false
-BMX7_AVAILABLE=false
-
-# Check if BMX7 is available
-if has_bmx7 "$GATEWAY"; then
-    BMX7_AVAILABLE=true
+MESH_PROTO=$(detect_mesh_protocol "$GATEWAY")
+MESH_AVAILABLE=false
+if [ "${MESH_PROTO}" != "none" ]; then
+    MESH_AVAILABLE=true
 fi
 
 cleanup_validate() {
@@ -23,9 +22,9 @@ cleanup_validate() {
     CLEANUP_DONE=true
     # Restore community SSID
     ssh_vm "$GATEWAY" "uci set lime-community.wifi.ap_ssid='MeshaTestBed'; uci commit lime-community" 2>/dev/null || true
-    # Restart BMX7 on node-2 if available
-    if $BMX7_AVAILABLE; then
-        restart_bmx7 "$NODE2"
+    # Restart the active mesh daemon on node-2
+    if $MESH_AVAILABLE; then
+        restart_mesh_protocol "$NODE2"
     fi
 }
 trap cleanup_validate EXIT INT TERM
@@ -82,11 +81,14 @@ else
     fail "test_validate_detects_missing_ssid" "validate-node did not detect missing SSID (exit=${VALIDATE_RESULT})"
 fi
 
-# Test 3: validate-node detects no neighbors
-if $BMX7_AVAILABLE; then
+# Test 3: validate-node detects no neighbors — protocol-agnostic.
+# Stop the active mesh daemon on node-2 and verify validate-node catches it.
+if $MESH_AVAILABLE; then
     echo "# Testing validate-node detects no neighbors..."
-    # Stop BMX7 on node-2
-    ssh_vm "$NODE2" "/etc/init.d/bmx7 stop 2>/dev/null; killall bmx7 2>/dev/null" || true
+    # killall needs the daemon binary name (batmand for batman-adv).
+    MESH_BIN="${MESH_PROTO}"
+    [ "${MESH_PROTO}" = "batman-adv" ] && MESH_BIN="batmand"
+    ssh_vm "$NODE2" "killall ${MESH_BIN} 2>/dev/null" || true
     sleep 5
 
     VALIDATE_RESULT=0
@@ -94,8 +96,8 @@ if $BMX7_AVAILABLE; then
         "${MESHA_ROOT}/skills/mesh-rollout/scripts/validate-node.sh" "$GATEWAY" \
         >/dev/null 2>&1 || VALIDATE_RESULT=$?
 
-    # Restart BMX7
-    restart_bmx7 "$NODE2"
+    # Restart the active mesh daemon
+    restart_mesh_protocol "$NODE2"
     sleep 5
 
     # Note: validate-node might not check neighbors on other nodes, only local
@@ -106,7 +108,7 @@ if $BMX7_AVAILABLE; then
         skip "test_validate_detects_no_neighbors" "validate-node may not check remote neighbors"
     fi
 else
-    skip "test_validate_detects_no_neighbors" "BMX7 not available on prebuilt image"
+    skip "test_validate_detects_no_neighbors" "no mesh protocol available on prebuilt image"
 fi
 
 tap_summary

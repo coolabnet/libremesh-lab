@@ -38,8 +38,22 @@ ls -la /dev/kvm
 ```bash
 sudo apt-get install -y \
     qemu-system-x86 qemu-utils cmake g++ pkg-config \
-    libnl-3-dev libnl-genl-3-dev iproute2 python3-yaml jq
+    libnl-3-dev libnl-genl-3-dev libconfig-dev iproute2 python3-yaml jq
 ```
+
+### 3.5 Install wmediumd
+
+wmediumd is not packaged for Ubuntu. Build it from source and install to
+`libremesh-lab/bin/`:
+
+```bash
+scripts/qemu/build-wmediumd.sh
+```
+
+This clones a pinned [cozybit/wmediumd](https://github.com/cozybit/wmediumd)
+commit, compiles it, and installs the binary and libconfig runtime into `bin/`.
+Set `WMEDIUMD_REPO` / `WMEDIUMD_REF` only when deliberately testing a fork or
+upgrade. The namespace preflight and tests will find the binary automatically.
 
 ### 4. Start Runner
 

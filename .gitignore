@@ -21,6 +21,11 @@ build-inputs.hash
 src/vwifi/
 bin/vwifi-*
 
+# wmediumd is built locally by scripts/qemu/build-wmediumd.sh
+# (see docs/self-hosted-runner.md for build instructions)
+bin/wmediumd
+bin/lib/
+
 # Local environment
 .env
 .env.*
@@ -28,6 +33,14 @@ bin/vwifi-*
 
 # Local/project notes
 PROGRESS.md
+
+# Local QA scratch (untracked, do not commit)
+qa
+qa-privileged.sh
+qa-privileged-report.txt
+
+# Research drafts in plans/ (use research/ for committed notes)
+plans/*.md
 
 # OS/editor/cache noise
 .DS_Store

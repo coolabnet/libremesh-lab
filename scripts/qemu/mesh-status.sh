@@ -15,11 +15,22 @@ lab_topology_load "${TOPOLOGY_FILE}"
 # ─── Helper: check if SSH is reachable ───
 check_ssh() {
     local ip="$1"
-    ssh -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o BatchMode=yes \
-        -o ConnectTimeout=3 \
-        "root@${ip}" "echo ok" &>/dev/null
+    local ssh_opts=(
+        -o StrictHostKeyChecking=no
+        -o UserKnownHostsFile=/dev/null
+        -o BatchMode=yes
+        -o ConnectTimeout=3
+    )
+    # Use key auth if available
+    local ssh_key="${RUN_DIR}/ssh-keys/id_ed25519"
+    if [[ -f "${ssh_key}" ]]; then
+        ssh_opts+=(
+            -o IdentitiesOnly=yes
+            -o PreferredAuthentications=publickey
+            -i "${ssh_key}"
+        )
+    fi
+    ssh "${ssh_opts[@]}" "root@${ip}" "echo ok" &>/dev/null
 }
 
 # Build VM JSON entries
@@ -35,7 +46,13 @@ for ((i = 0; i < NODE_COUNT; i++)); do
 
     if [ -f "$pid_file" ]; then
         pid=$(cat "$pid_file" 2>/dev/null || true)
-        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        # Check process existence via /proc (works regardless of process owner)
+        # and verify the PID actually points at a QEMU process — without the
+        # cmdline check, PID reuse after a QEMU exit could report a stale PID
+        # as running if some other process happens to land on the same number.
+        if [[ "$pid" =~ ^[0-9]+$ ]] \
+           && [ -d "/proc/$pid" ] \
+           && grep -q "qemu-system" "/proc/$pid/cmdline" 2>/dev/null; then
             running=true
             if check_ssh "$ip"; then
                 ssh_ok=true
@@ -58,7 +75,9 @@ vwifi_pid=0
 vwifi_pid_file="${RUN_DIR}/vwifi-server.pid"
 if [ -f "$vwifi_pid_file" ]; then
     vwifi_pid=$(cat "$vwifi_pid_file" 2>/dev/null || true)
-    if [[ "$vwifi_pid" =~ ^[0-9]+$ ]] && kill -0 "$vwifi_pid" 2>/dev/null; then
+    if [[ "$vwifi_pid" =~ ^[0-9]+$ ]] \
+       && [ -d "/proc/$vwifi_pid" ] \
+       && grep -q "vwifi-server" "/proc/$vwifi_pid/cmdline" 2>/dev/null; then
         vwifi_running=true
     else
         vwifi_pid=0

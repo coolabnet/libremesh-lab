@@ -88,6 +88,8 @@ case "${SUITE}" in
     fast)
         run_test_file "Fast CLI" "${SCRIPT_DIR}/test-fast-cli.sh"
         run_test_file "Run Adapter Wrapper" "${SCRIPT_DIR}/test-run-adapter-wrapper.sh"
+        run_test_file "QEMU Script Units" "${SCRIPT_DIR}/test-qemu-script-units.sh"
+        run_test_file "Mesh Status PID" "${SCRIPT_DIR}/test-mesh-status-pid.sh"
         run_test_file "Namespace Preflight" "${SCRIPT_DIR}/test-namespace-preflight.sh"
         ;;
     lab)

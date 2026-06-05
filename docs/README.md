@@ -1,16 +1,20 @@
-# LibreMesh Lab
+# LibreMesh Lab Documentation
+
+LibreMesh Lab is a Bash/QEMU testbed for running LibreMesh/OpenWrt mesh networks on a local Linux machine. The root [README](../README.md) gives the short introduction and quick start. This directory holds the detailed guides.
+
+## Start Here
+
+| Guide | Use it for |
+|---|---|
+| [Architecture](architecture.md) | How the VMs, host bridge, vwifi, wmediumd, topologies, and directories fit together. |
+| [Testing](testing.md) | Test suites, test files, environment variables, and safe/destructive test rules. |
+| [Mesha integration](mesha-integration.md) | Running Mesha or other adapter scripts against the lab without changing the caller repo. |
+| [Contributing](contributing.md) | Development conventions, commit style, PR expectations, and safety rules. |
+| [Troubleshooting](troubleshooting.md) | Common QEMU, SSH, vwifi, bridge, and mesh convergence failures. |
+| [Self-hosted runner](self-hosted-runner.md) | Setting up a KVM-capable runner for VM-backed tests. |
+| [QEMU adapter test guide](qemu-adapter-test-guide.md) | Full adapter testing walkthrough for Mesha-style adapter scripts. |
 
 ## Quick Start
-
-Install the CLI into the default user-local location:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/coolabnet/libremesh-lab/main/scripts/install.sh | bash
-```
-
-The installer clones the repository to `~/.local/share/libremesh-lab` and
-symlinks `libremesh-lab` into `~/.local/bin`. For a local checkout, run the same
-commands through `bin/libremesh-lab`.
 
 ```bash
 # 1. Build or download firmware image
@@ -18,159 +22,85 @@ bin/libremesh-lab build-image
 # OR use pre-built image conversion:
 bash scripts/qemu/convert-prebuilt.sh
 
-# 2. Start the test bed (requires root for bridge/TAP/dnsmasq/QEMU networking)
+# 2. For source-built images only: install SSH keys and DHCP into the image
+scripts/qemu/configure-source-image.sh --image images/libremesh-combined.img
+
+# 3. Start the test bed; requires root for bridge/TAP/dnsmasq/QEMU networking
 sudo bin/libremesh-lab start
 
-# 3. Configure VMs (wait ~90s for boot)
+# 4. Configure VMs after roughly 90 seconds of boot time
 bin/libremesh-lab configure
 
-# 4. Run the safe VM-free suite
-bin/libremesh-lab test --suite fast
-
-# 5. Run VM-backed checks while the lab is still running
+# 5. Run tests
+bin/libremesh-lab test
 bin/libremesh-lab test --suite lab
 MESHA_ROOT=/path/to/mesha bin/libremesh-lab test --suite adapter
 
-# 6. Stop the test bed
-sudo bash scripts/qemu/stop-mesh.sh
+# 6. Tear down
+sudo bin/rollback-lab.sh
+sudo bin/rollback-lab.sh --full
 ```
 
-## Architecture
+## Main Commands
 
-4 LibreMesh VMs connected via TAP/bridge networking:
+| Command | Purpose |
+|---|---|
+| `bin/libremesh-lab build-image` | Build or prepare a LibreMesh firmware image. |
+| `sudo bin/libremesh-lab start` | Start vwifi, host networking, and four QEMU VMs. |
+| `bin/libremesh-lab configure` | Configure hostnames, IPs, mesh protocol, and SSH keys after boot. |
+| `sudo bin/libremesh-lab stop` | Stop VMs and clean lab networking/runtime state. |
+| `bin/libremesh-lab status` | Print lab status as JSON. |
+| `bin/libremesh-lab logs` | Collect logs for debugging or CI artifacts. |
+| `bin/libremesh-lab test` | Run the default safe `fast` suite. |
+| `bin/libremesh-lab run-adapter <script>` | Run an external adapter script against lab config. |
+| `sudo bin/rollback-lab.sh` | Comprehensive cleanup for VMs, TAPs, bridge, runtime state, and locks. |
 
-- **lm-testbed-node-1** (10.99.0.11) — gateway
-- **lm-testbed-node-2** (10.99.0.12) — relay
-- **lm-testbed-node-3** (10.99.0.13) — leaf
-- **lm-testbed-tester** (10.99.0.14) — tester (512MB RAM)
-
-Each VM has:
-
-- mesh0 (TAP via mesha-br0) — management SSH + wired mesh
-- wan0 (QEMU user-mode) — internet access
-- wlan0 (vwifi-client → vwifi-server) — WiFi mesh simulation
-
-The host (10.99.0.254) runs vwifi-server for inter-VM WiFi frame relay.
-
-## Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `build-libremesh-image.sh` | Build custom LibreMesh firmware with vwifi support |
-| `convert-prebuilt.sh` | Download and convert LibreRouterOS pre-built image |
-| `start-vwifi.sh` | Compile and launch vwifi-server |
-| `start-mesh.sh` | Launch 4 QEMU VMs with TAP/bridge networking |
-| `configure-vms.sh` | Post-boot: hostname, IP, BMX7, lime-config, SSH keys |
-| `stop-mesh.sh` | Teardown: kill VMs, cleanup TAP/bridge |
-| `mesh-status.sh` | Status check: VM state, SSH, vwifi, bridge |
-| `run-testbed-adapter.sh` | Run adapter scripts with testbed path mapping |
-| `validate-adapters.sh` | Validate all adapter scripts against test bed |
-| `collect-logs.sh` | Collect logs for CI artifact upload |
-
-## Suite Selection
-
-The default test command is intentionally safe:
+## Full Workflow
 
 ```bash
+# Build or get an image
+bin/libremesh-lab build-image
+# or
+bash scripts/qemu/convert-prebuilt.sh
+
+# Prepare source-built images when needed
+scripts/qemu/configure-source-image.sh --image images/libremesh-combined.img
+
+# Start and configure the lab
+sudo bin/libremesh-lab start
+bin/libremesh-lab configure
+
+# Run checks
 bin/libremesh-lab test
-bin/libremesh-lab test --suite fast
+bin/libremesh-lab test --suite lab
+MESHA_ROOT=/path/to/mesha bin/libremesh-lab test --suite adapter
+
+# Clean up
+sudo bin/rollback-lab.sh
 ```
-
-Available suites:
-
-| Suite | Requirements | Notes |
-|-------|--------------|-------|
-| `fast` | No VMs, no Mesha checkout, no root | CLI contract, `run-adapter` workspace isolation, and namespace preflight |
-| `lab` | Already running and configured QEMU/vwifi lab | Mesh protocol and rollback checks |
-| `adapter` | Running lab plus `MESHA_ROOT=/path/to/mesha` | Mesha adapters, rollout, drift, validation, readonly, and failure-path checks |
-| `lifecycle` | Isolated host, root-capable start/stop, `RUN_LIFECYCLE_TESTS=1` | Destructive lifecycle cleanup coverage |
-| `namespace` | Isolated host with namespace/wmediumd prerequisites | Runs preflight by default; with `RUN_NAMESPACE_TESTS=1`, runs a root-gated two-node hwsim/wmediumd mesh smoke |
-
-`lab` and `adapter` do not create the VMs themselves. Build or prepare the
-firmware, start the lab with root privileges, wait for boot, run
-`bin/libremesh-lab configure`, and then run those suites. Use `CONVERGE_WAIT` and
-`QEMU_TIMEOUT_MULTIPLIER` on slower hosts.
-
-The namespace suite runs the safe preflight first. The preflight checks for
-`ip`, `ip netns`, `iw`, `wmediumd`, `modprobe`, `ping`, `timeout`, and
-`mac80211_hwsim` availability without creating namespaces, loading kernel
-modules, or requiring root:
-
-```bash
-bash scripts/qemu/preflight-namespace.sh
-bin/libremesh-lab test --suite namespace
-sudo env RUN_NAMESPACE_TESTS=1 bin/libremesh-lab test --suite namespace
-```
-
-With `RUN_NAMESPACE_TESTS=1`, the suite loads two disposable hwsim radios, moves
-one PHY into a network namespace, starts `wmediumd`, joins both interfaces to an
-802.11s mesh, verifies ping over the simulated medium, and cleans up. Run it
-only on an isolated host; if `mac80211_hwsim` is already loaded, set
-`LIBREMESH_LAB_NAMESPACE_RESET_HWSIM=1` only when it is safe to unload/reload it.
-
-## Test Files
-
-| Test file | Tests |
-|-----------|-------|
-| `test-adapters.sh` | collect-nodes JSON, collect-topology, thisnode discovery, ip -j |
-| `test-mesh-protocols.sh` | BMX7 neighbors, originators, mesh routing, Babel fallback |
-| `test-validate-node.sh` | Healthy node, missing SSID detection, no neighbors |
-| `test-config-drift.sh` | UCI write/read, drift detection |
-| `test-topology-manipulation.sh` | vwifi-ctrl distance-based loss, node removal |
-| `test-firmware-upgrade.sh` | Firmware version change, validate-node mismatch |
-| `test-multi-hop.sh` | End-to-end multi-hop connectivity |
-| `test-rollback.sh` | Configuration backup and rollback |
-| `test-rollout.sh` | Rolling configuration update dry runs |
-| `test-failure-paths.sh` | Unreachable hosts and adapter error handling |
-| `test-run-adapter-wrapper.sh` | No-VM adapter workspace isolation regression |
-| `test-namespace-preflight.sh` | No-root namespace/wmediumd preflight regression |
-| `test-namespace-wmediumd.sh` | Root-gated two-node hwsim/wmediumd namespace smoke |
-
-## Adapter Isolation
-
-`bin/libremesh-lab run-adapter <script> [args...]` runs Mesha or other adapter
-scripts from a temporary workspace instead of the caller repository. The wrapper:
-
-- Maps lab `config/inventories`, `config/desired-state`, `config/topology.yaml`, and SSH config into the temporary workspace.
-- Copies adapter repository entries into the temporary workspace while excluding selected generated or heavy top-level entries such as `.git`, `.venv`, `node_modules`, `exports`, `images`, `logs`, and `run`, then removes VCS metadata from the copy.
-- Exposes `REPO_ROOT`, `WORKSPACE_ROOT`, `SOURCE_WORKSPACE_ROOT`, `LIBREMESH_LAB_ROOT`, `LIBREMESH_LAB_CONFIG`, `LIBREMESH_LAB_INVENTORIES`, `LIBREMESH_LAB_DESIRED_STATE`, `SSH_CONFIG_PATH`, `SSH_KEY`, and `GIT_SSH_COMMAND`.
-- Sets an isolated `HOME` and an SSH wrapper that automatically uses the lab SSH config.
-
-This lets adapter scripts that expect repository-relative paths run against lab
-fixtures without writing generated files back into the source checkout.
 
 ## Requirements
 
 | Resource | Minimum | Recommended |
-|----------|---------|-------------|
+|---|---:|---:|
 | RAM | 4 GB | 8 GB |
-| CPU | 2 cores (TCG) | 4+ cores (KVM) |
+| CPU | 2 cores using TCG | 4+ cores with KVM |
 | Disk | 2 GB | 5 GB |
-| Permissions | sudo/CAP_NET_ADMIN for VM networking | root on isolated QA hosts |
+| OS | Linux | Linux with KVM |
+| Permissions | sudo / CAP_NET_ADMIN for VM networking | root on isolated QA hosts |
 
-Host root privileges are required for commands that create or remove bridge, TAP,
-dnsmasq, vwifi, QEMU, loopback mount, or namespace state. In practice, run
-`start`, `stop`, direct `start-vwifi.sh`, direct `start-mesh.sh`, direct
-`stop-mesh.sh`, and pre-built image conversion with `sudo` when prompted by the
-host. `status`, `logs`, `configure`, `test --suite fast`, and `run-adapter`
-should run unprivileged after the lab exists.
-
-Namespace work starts with the non-mutating preflight:
-
-```bash
-bash scripts/qemu/preflight-namespace.sh
-```
-
-Only run root-backed namespace creation or module loading on an isolated host
-after bridge, namespace, and wireless simulation cleanup expectations are clear.
+Root privileges are required for bridge, TAP, dnsmasq, vwifi, QEMU, loopback mount, and namespace operations. `status`, `logs`, `configure`, `test --suite fast`, and `run-adapter` normally run unprivileged after the lab exists.
 
 ## Known Limitations
 
-- TCG mode (no KVM) is 3x slower — increase timeouts
-- Pre-built images lack WiFi simulation (mac80211_hwsim, vwifi)
-- BMX7 convergence takes 30-60s in virtualized environment
-- vwifi-ctrl only supports global packet loss (not per-link)
+- QEMU TCG mode is about 3x slower than KVM. Use `QEMU_TIMEOUT_MULTIPLIER` on slower hosts.
+- Pre-built images are quick to prepare but do not include full Wi-Fi simulation support.
+- Mesh protocol convergence can take 30-60 seconds in virtualized environments.
+- Babel in a wired `br-lan` topology may not install extra kernel routes because layer 2 already provides reachability.
+- `vwifi-ctrl` currently supports global packet loss, not per-link packet loss.
 
-## Troubleshooting
+## Agent and QA Notes
 
-See [troubleshooting.md](troubleshooting.md).
+- Agent-facing repository conventions live in [AGENTS.md](../AGENTS.md).
+- End-to-end QA guidance lives in [QA.md](../QA.md).
+- Generated runtime data belongs in `run/`, built firmware images in `images/`, and external checkouts in `src/`; keep these artifacts out of commits.
