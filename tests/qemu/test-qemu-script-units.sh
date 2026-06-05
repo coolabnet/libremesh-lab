@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 echo "# QEMU Script Unit Tests"
-tap_plan 7
+tap_plan 9
 
 # ─── convert-prebuilt.sh --help ───────────────────────────────────────────────
 CONVERT_HELP="${LAB_ROOT}/scripts/qemu/convert-prebuilt.sh"
@@ -86,6 +86,44 @@ if echo "${UNKNOWN_OUT}" | grep -qi "unknown option\|ERROR"; then
     pass "test_convert_prebuilt_parser_rejects_unknown_option"
 else
     fail "test_convert_prebuilt_parser_rejects_unknown_option" "output=${UNKNOWN_OUT}"
+fi
+
+# ─── rollback-lab.sh sudo re-exec preserves parsed args ───────────────────────
+# rollback-lab.sh parses --full before its root check. Preserve the original
+# argv for sudo re-exec so a non-root `bin/rollback-lab.sh --full` does not
+# silently become a root `bin/rollback-lab.sh` without --full.
+ROLLBACK_PROBE_DIR=$(mktemp -d)
+ROLLBACK_ID_STUB="${ROLLBACK_PROBE_DIR}/id"
+ROLLBACK_SUDO_STUB="${ROLLBACK_PROBE_DIR}/sudo"
+cat > "${ROLLBACK_ID_STUB}" <<'STUB_EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-u" ]; then
+    echo 1000
+    exit 0
+fi
+exec /usr/bin/id "$@"
+STUB_EOF
+cat > "${ROLLBACK_SUDO_STUB}" <<'STUB_EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    printf 'SUDO_ARG=%s\n' "${arg}"
+done
+exit 77
+STUB_EOF
+chmod +x "${ROLLBACK_ID_STUB}" "${ROLLBACK_SUDO_STUB}"
+ROLLBACK_REEXEC_OUT=$(PATH="${ROLLBACK_PROBE_DIR}:${PATH}" \
+    bash "${LAB_ROOT}/bin/rollback-lab.sh" --full 2>&1 || true)
+rm -rf "${ROLLBACK_PROBE_DIR}"
+if echo "${ROLLBACK_REEXEC_OUT}" | grep -qx 'SUDO_ARG=--full'; then
+    pass "test_rollback_full_arg_survives_sudo_reexec"
+else
+    fail "test_rollback_full_arg_survives_sudo_reexec" "output=${ROLLBACK_REEXEC_OUT}"
+fi
+
+if grep -q 'LAB_SCOPE_TOKENS=.*"vwifi"' "${LAB_ROOT}/bin/rollback-lab.sh"; then
+    fail "test_rollback_scope_tokens_do_not_match_process_name" "LAB_SCOPE_TOKENS must not include broad process-name token 'vwifi'"
+else
+    pass "test_rollback_scope_tokens_do_not_match_process_name"
 fi
 
 # ─── config/ssh-config uses id_ed25519 ────────────────────────────────────────

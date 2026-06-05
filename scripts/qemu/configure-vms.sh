@@ -108,7 +108,15 @@ verify_vwifi_server() {
 start_mesh_daemon_on_vm() {
     local ip="$1"
     local proto="$2"
-    [ -n "${proto}" ] || return 0
+    case "${proto}" in
+        babeld|bmx7) ;;
+        "") return 0 ;;
+        *)
+            echo "  [${ip}] WARN: refusing to start unsupported mesh protocol: ${proto}" >&2
+            return 1
+            ;;
+    esac
+
     ssh_vm "$ip" "
         killall ${proto} 2>/dev/null || true
         if iw dev wlan0 info >/dev/null 2>&1; then

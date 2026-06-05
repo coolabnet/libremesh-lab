@@ -28,8 +28,9 @@ NODE_COUNT=4
 # hosts where other QEMU VMs, vwifi instances, or dnsmasq servers may be
 # running. We only target processes that reference one of these tokens in
 # their cmdline — that way `pgrep -f` cannot hit unrelated host services.
-LAB_SCOPE_TOKENS=("mesha-" "${BRIDGE_NAME}" "${TAP_PREFIX}" "${LAB_ROOT}/run" "vwifi")
+LAB_SCOPE_TOKENS=("mesha-" "${BRIDGE_NAME}" "${TAP_PREFIX}" "${LAB_ROOT}/run")
 
+ORIGINAL_ARGS=("$@")
 FULL_UNDO=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -65,7 +66,7 @@ if [ "$(id -u)" -ne 0 ]; then
     # under the privileged context. LAB_ROOT is recomputed from
     # BASH_SOURCE[0] at line 22 on the re-exec, so it does not need
     # to be preserved; we use bare `sudo --` with no --preserve-env.
-    exec sudo -- "$0" "$@"
+    exec sudo -- "$0" "${ORIGINAL_ARGS[@]}"
 fi
 
 echo "=========================================="
@@ -88,16 +89,17 @@ echo ""
 echo "--- Force-killing any leftover lab-scoped processes ---"
 for pattern in qemu-system vwifi-server dnsmasq; do
     pids=""
-    for token in "${LAB_SCOPE_TOKENS[@]}"; do
-        token_pids=$(pgrep -f "${pattern}.*${token}" 2>/dev/null || true)
-        # pgrep matches either the pattern before or after the token; require
-        # both substrings to co-occur in the cmdline to avoid false positives.
-        for pid in ${token_pids}; do
+    for pid in $(pgrep -f "${pattern}" 2>/dev/null || true); do
+        # Require the process type plus at least one literal lab token to
+        # co-occur in /proc cmdline. Keeping LAB_SCOPE_TOKENS out of the pgrep
+        # regex avoids mismatches when LAB_ROOT contains regex metacharacters.
+        for token in "${LAB_SCOPE_TOKENS[@]}"; do
             if [ -r "/proc/${pid}/cmdline" ]; then
                 cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)
                 if [[ "${cmdline}" == *"${pattern}"* ]] \
                    && [[ "${cmdline}" == *"${token}"* ]]; then
                     pids="${pids:+${pids} }${pid}"
+                    break
                 fi
             fi
         done
