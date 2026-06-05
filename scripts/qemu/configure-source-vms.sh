@@ -170,9 +170,47 @@ configure_node() {
         return 1
     fi
     send_serial_cmd "${node_id}" "mkdir -p /root/.ssh && chmod 700 /root/.ssh" 1 >/dev/null
-    send_serial_cmd "${node_id}" "echo '${pubkey}' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys" 1 >/dev/null
-    # Also add to /etc/dropbear for good measure
-    send_serial_cmd "${node_id}" "echo '${pubkey}' > /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys" 1 >/dev/null
+    # Send public key via stdin to avoid shell injection via key content
+    sudo python3 -c "
+import socket, time, sys, os
+sock_path = '/tmp/node-${node_id}-serial.sock'
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sock_path)
+s.settimeout(5)
+try: s.recv(65536)
+except: pass
+cmd = 'cat > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys\n'
+s.send(cmd.encode())
+time.sleep(0.5)
+# Send the public key content
+key = '''${pubkey}'''
+s.send(key.encode())
+s.send(b'\n')
+time.sleep(0.5)
+s.send(b'\x04')  # EOF (Ctrl-D)
+time.sleep(1)
+s.close()
+" 2>/dev/null
+    # Also add to /etc/dropbear for good measure (via stdin)
+    sudo python3 -c "
+import socket, time, sys, os
+sock_path = '/tmp/node-${node_id}-serial.sock'
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sock_path)
+s.settimeout(5)
+try: s.recv(65536)
+except: pass
+cmd = 'cat > /etc/dropbear/authorized_keys && chmod 600 /etc/dropbear/authorized_keys\n'
+s.send(cmd.encode())
+time.sleep(0.5)
+key = '''${pubkey}'''
+s.send(key.encode())
+s.send(b'\n')
+time.sleep(0.5)
+s.send(b'\x04')  # EOF (Ctrl-D)
+time.sleep(1)
+s.close()
+" 2>/dev/null
     pass "SSH key injected"
 
     # 5. Load mac80211_hwsim module
