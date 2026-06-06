@@ -8,8 +8,12 @@
 
 set -euo pipefail
 
+# Debug flag: --debug enables verbose SSH output and per-phase timing.
+DEBUG="${DEBUG:-0}"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${REPO_ROOT}/run"
+LOG_DIR="${RUN_DIR}/logs"
 TOPOLOGY_FILE="${REPO_ROOT}/config/topology.yaml"
 SSH_KEY_DIR="${RUN_DIR}/ssh-keys"
 SSH_KEY="${SSH_KEY_DIR}/id_ed25519"
@@ -135,6 +139,147 @@ start_mesh_daemon_on_vm() {
     " || true
 }
 
+# ─── Phase timing helper ───
+# Usage: phase_start "Phase 1 name"
+#        ... do work ...
+#        phase_end
+# When DEBUG=1, prints elapsed time for each phase. No-op when DEBUG=0
+# except for a single "phase ended" line that keeps output aligned.
+PHASE_START_EPOCH=0
+phase_start() {
+    if [[ "${DEBUG}" == "1" ]]; then
+        echo "  [phase] start: $*"
+    fi
+    PHASE_START_EPOCH=$(date +%s)
+}
+phase_end() {
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$(( now - PHASE_START_EPOCH ))
+    if [[ "${DEBUG}" == "1" ]]; then
+        echo "  [phase] end: ${elapsed}s"
+    fi
+    PHASE_START_EPOCH=0
+}
+
+# ─── Diagnostic dump ───
+# When mesh convergence fails, collect per-node diagnostics
+# and write to run/logs/convergence-diagnostics.log. This is the first
+# place to look when the testbed fails to converge: it shows whether IPs
+# are assigned, interfaces are up, UCI configs are correct, the mesh
+# daemon is running, and what netifd/babeld logged.
+# Also called unconditionally with --debug so the operator has a snapshot
+# even on a successful run.
+collect_diagnostics() {
+    local reason="${1:-unspecified}"
+    mkdir -p "${LOG_DIR}"
+    local diag_file="${LOG_DIR}/convergence-diagnostics.log"
+    local ts
+    ts=$(date -Iseconds 2>/dev/null || date)
+
+    {
+        echo "=========================================="
+        echo " Convergence diagnostics: ${reason}"
+        echo " Timestamp: ${ts}"
+        echo " Lab: ${REPO_ROOT}"
+        echo "=========================================="
+        echo ""
+
+        local idx=0
+        for ip in "${NODE_IPS[@]}"; do
+            local hostname="${NODE_HOSTNAMES[$idx]}"
+            echo "--- Node ${hostname} (${ip}) ---"
+            echo ""
+
+            # Only run diagnostic commands if the host is reachable; mark
+            # the section "(unreachable)" otherwise so it's clear which
+            # nodes we couldn't even SSH into.
+            if ! ssh_vm "$ip" "echo reachable" &>/dev/null; then
+                echo "(unreachable via SSH)"
+                echo ""
+                idx=$((idx + 1))
+                continue
+            fi
+
+            echo "[ip addr show]"
+            ssh_vm "$ip" "ip addr show 2>/dev/null" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[ip link show]"
+            ssh_vm "$ip" "ip link show 2>/dev/null" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[ip route show]"
+            ssh_vm "$ip" "ip route show 2>/dev/null" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[/etc/config/network]"
+            ssh_vm "$ip" "cat /etc/config/network 2>/dev/null" 2>/dev/null || echo "  (file not present)"
+            echo ""
+
+            echo "[/etc/config/babeld]"
+            ssh_vm "$ip" "cat /etc/config/babeld 2>/dev/null" 2>/dev/null || echo "  (file not present)"
+            echo ""
+
+            echo "[ps: babeld/bmx7/batmand]"
+            ssh_vm "$ip" "ps -w 2>/dev/null | grep -E 'babeld|bmx7|batmand' | grep -v grep" 2>/dev/null || echo "  (none running)"
+            echo ""
+
+            echo "[UDP listeners: babeld]"
+            ssh_vm "$ip" "(netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -E 'babeld|bmx7' || echo '  (none)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[kernel routes: proto babel]"
+            ssh_vm "$ip" "ip route show proto babel 2>/dev/null || echo '  (none)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[logread: babeld (last 20)]"
+            ssh_vm "$ip" "logread 2>/dev/null | grep -i babeld | tail -20 || echo '  (no logread / no babeld entries)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[logread: netifd (last 20)]"
+            ssh_vm "$ip" "logread 2>/dev/null | grep -i netifd | tail -20 || echo '  (no logread / no netifd entries)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[logread: lime-config (last 20)]"
+            ssh_vm "$ip" "logread 2>/dev/null | grep -i lime | tail -20 || echo '  (no logread / no lime entries)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[/etc/rc.local (first 40 lines)]"
+            ssh_vm "$ip" "head -40 /etc/rc.local 2>/dev/null || echo '  (no rc.local)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            idx=$((idx + 1))
+        done
+
+        echo "--- Host bridge state ---"
+        echo ""
+        echo "[ip link show ${BRIDGE_NAME}]"
+        ip link show "${BRIDGE_NAME}" 2>/dev/null || echo "  (bridge not present)"
+        echo ""
+        echo "[bridge link show]"
+        bridge link show 2>/dev/null || echo "  (bridge command unavailable)"
+        echo ""
+        echo "[dnsmasq leases]"
+        if [ -f "${RUN_DIR}/dnsmasq-dhcp.leases" ]; then
+            cat "${RUN_DIR}/dnsmasq-dhcp.leases" 2>/dev/null
+        elif [ -f /var/lib/misc/dnsmasq.leases ]; then
+            cat /var/lib/misc/dnsmasq.leases 2>/dev/null
+        else
+            echo "  (no leases file found)"
+        fi
+        echo ""
+    } > "${diag_file}" 2>&1
+
+    echo "  Diagnostics written to: ${diag_file}"
+    if [[ "${DEBUG}" != "1" ]]; then
+        # Surface a short summary on the console so the user can decide
+        # whether to look at the full log.
+        echo "  First 20 lines:"
+        head -20 "${diag_file}" | sed 's/^/    /'
+    fi
+}
+
 # ─── SSH helper ───
 # Tries key auth first (if SSH key exists), falls back to password auth.
 # This makes the script work with both source-built (pre-baked keys) and
@@ -155,37 +300,57 @@ ssh_vm() {
     local target
     target="$(ssh_target "${ip}")"
 
+    # Helper: run an SSH command and return 0 if it succeeds, 1 otherwise.
+    # In DEBUG=1 mode, SSH stderr flows to the terminal (fd 2) so
+    # connection/auth failures are visible. In default mode, stderr
+    # is suppressed. We do NOT merge stderr into stdout (2>&1)
+    # because callers capture stdout in command substitutions;
+    # merging would pollute parsed output with diagnostic noise.
+    _ssh_vm_try() {
+        # Args: ssh command (array-style: the caller uses "$@" to pass them)
+        # In DEBUG=1 mode, SSH stderr flows to the terminal (fd 2) so
+        # connection/auth failures are visible. In default mode, stderr
+        # is suppressed. We do NOT merge stderr into stdout (2>&1)
+        # because callers capture stdout in command substitutions;
+        # merging would pollute parsed output with diagnostic noise.
+        if [[ "${DEBUG}" == "1" ]]; then
+            "$@"
+        else
+            "$@" 2>/dev/null
+        fi
+    }
+
     # Try key-based auth first when key file exists (source-built images)
     if [[ -f "${SSH_KEY}" ]]; then
-        ssh -o StrictHostKeyChecking=no \
+        _ssh_vm_try ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o HostKeyAlgorithms=+ssh-rsa \
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
             -i "${SSH_KEY}" \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "${target}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" && return 0
     fi
 
     # Fallback: password auth via sshpass (empty password for source-built images)
     # Use PreferredAuthentications=password to avoid "none" auth masking key issues
     if command -v sshpass >/dev/null 2>&1; then
-        sshpass -p "" ssh -o StrictHostKeyChecking=no \
+        _ssh_vm_try sshpass -p "" ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o HostKeyAlgorithms=+ssh-rsa \
             -o PreferredAuthentications=password \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "${target}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" && return 0
     fi
 
     # Last resort: try with password "root" (for prebuilt images)
     if command -v sshpass >/dev/null 2>&1; then
-        sshpass -p "root" ssh -o StrictHostKeyChecking=no \
+        _ssh_vm_try sshpass -p "root" ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o HostKeyAlgorithms=+ssh-rsa \
             -o PreferredAuthentications=password \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "${target}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" && return 0
     fi
 
     return 1
@@ -274,6 +439,17 @@ configure_vm() {
     local has_lime_config
     has_lime_config=$(ssh_vm "$ip" "which lime-config 2>/dev/null && echo yes || echo no") || has_lime_config="no"
 
+    # Detect which mesh routing protocol is available. Order matches
+    # tests/qemu/common.sh:detect_mesh_protocol: babeld > bmx7. Used by both
+    # the LibreMesh (post-lime-config repair) and bare-OpenWrt paths, and
+    # by the unified re-verify block at the end of configure_vm.
+    local mesh_proto="none"
+    if ssh_vm "$ip" "which babeld >/dev/null 2>&1" 2>/dev/null; then
+        mesh_proto="babeld"
+    elif ssh_vm "$ip" "which bmx7 >/dev/null 2>&1" 2>/dev/null; then
+        mesh_proto="bmx7"
+    fi
+
     if [[ "${has_lime_config}" == *"yes"* ]]; then
         echo "  [${hostname}] Full LibreMesh detected, using lime-config..."
 
@@ -318,19 +494,62 @@ configure_vm() {
             sleep 7 && \
             wifi up
         " || echo "  [${hostname}] WARN: lime-config sequence had errors"
+
+        # Post-lime-config verification: the rc.local in the image already
+        # rewrote /etc/config/network to DHCP-on-br-lan and started babeld,
+        # but lime-config may have re-clobbered either one. Verify and repair
+        # here over SSH (the rc.local runs before SSH is up, so this is the
+        # authoritative safety net).
+        echo "  [${hostname}] Verifying post-lime-config network state..."
+        local brlan_ip
+        brlan_ip=$(ssh_vm "$ip" "ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print \$2; exit}'" 2>/dev/null) || brlan_ip=""
+        if [[ -z "${brlan_ip}" || "${brlan_ip}" != "${ip}/"* ]]; then
+            echo "  [${hostname}] WARN: br-lan has wrong IP ('${brlan_ip:-none}'), re-applying testbed network config"
+            ssh_vm "$ip" "
+                uci -q delete network.lan 2>/dev/null
+                uci -q delete network.br_lan 2>/dev/null
+                uci set network.br_lan=device
+                uci set network.br_lan.name='br-lan'
+                uci set network.br_lan.type='bridge'
+                uci add_list network.br_lan.ports='eth0'
+                uci set network.lan=interface
+                uci set network.lan.device='br-lan'
+                uci set network.lan.proto='static'
+                uci set network.lan.ipaddr='${ip}'
+                uci set network.lan.netmask='255.255.0.0'
+                uci set network.lan.gateway='10.99.0.254'
+                uci set network.lan.metric='100'
+                uci commit network
+                /etc/init.d/network restart >/tmp/network-restart.log 2>&1 || true
+            " || echo "  [${hostname}] WARN: post-lime network repair failed"
+            # Re-apply the IP immediately so subsequent SSH commands in this
+            # function (and Phase 2/3) can reach the VM at the expected IP.
+            ssh_vm "$ip" "ip addr replace ${ip}/16 dev br-lan 2>/dev/null || true" || true
+        fi
+
+        # Ensure babeld is running on br-lan. The rc.local should have done
+        # this, but lime-config may have killed it or pointed it at a VLAN
+        # interface. Verify via pgrep + UDP listener (matches the convergence
+        # signal in tests/qemu/common.sh:count_mesh_neighbors).
+        if [[ "${mesh_proto}" == "babeld" ]]; then
+            local babeld_ok
+            babeld_ok=$(ssh_vm "$ip" "pgrep -x babeld >/dev/null 2>&1 && (netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -q babeld && echo yes || echo no" 2>/dev/null | tr -d '[:space:]')
+            if [[ "${babeld_ok}" != "yes" ]]; then
+                echo "  [${hostname}] babeld not listening, restarting..."
+                if ssh_vm "$ip" "[ -x /etc/init.d/babeld ]" 2>/dev/null; then
+                    ssh_vm "$ip" "/etc/init.d/babeld enable 2>/dev/null; /etc/init.d/babeld restart 2>/dev/null || babeld -D -I /var/run/babeld.pid br-lan 2>/dev/null &" || true
+                else
+                    ssh_vm "$ip" "killall babeld 2>/dev/null; babeld -D -I /var/run/babeld.pid br-lan 2>/dev/null &" || true
+                fi
+            fi
+        elif [[ "${mesh_proto}" == "bmx7" ]]; then
+            if ! ssh_vm "$ip" "pgrep -x bmx7 >/dev/null 2>&1" 2>/dev/null; then
+                echo "  [${hostname}] bmx7 not running, starting..."
+                ssh_vm "$ip" "killall bmx7 2>/dev/null; bmx7 dev=br-lan 2>/dev/null &" || true
+            fi
+        fi
     else
         echo "  [${hostname}] Bare OpenWrt detected (no lime-config), configuring mesh routing directly..."
-
-        # Detect available routing protocol. Order matches
-        # tests/qemu/common.sh:detect_mesh_protocol and the unstaged
-        # default: babeld > bmx7. (Pre-babeld images may still ship bmx7;
-        # we keep the bmx7 branch as a fallback.)
-        local mesh_proto="none"
-        if ssh_vm "$ip" "which babeld >/dev/null 2>&1" 2>/dev/null; then
-            mesh_proto="babeld"
-        elif ssh_vm "$ip" "which bmx7 >/dev/null 2>&1" 2>/dev/null; then
-            mesh_proto="bmx7"
-        fi
 
         # Start vwifi-client if vwifi is installed.
         # vwifi-client --number N creates PHY radios via mac80211_hwsim netlink,
@@ -387,30 +606,16 @@ configure_vm() {
         else
             echo "  [${hostname}] WARN: wlan0 not available, using wired br-lan fallback"
         fi
-
-        # Configure and start mesh routing protocol.
-        # Use BOTH wlan0 and br-lan when wlan0 is available:
-        #   - wlan0 provides the WiFi/IBSS simulation for adapter testing
-        #   - br-lan ensures convergence (vwifi IBSS forwards beacons
-        #     but not data frames, so routing protocol needs the wired path)
-        # start_mesh_daemon_on_vm (defined below) is reused by the
-        # re-verify block to avoid duplicating the kill/if-wlan0 dance.
-        case "${mesh_proto}" in
-            bmx7|babeld)
-                start_mesh_daemon_on_vm "$ip" "${mesh_proto}" || true
-                ;;
-            *)
-                echo "  [${hostname}] WARN: No mesh routing protocol found (bmx7/babeld)"
-                ;;
-        esac
     fi
 
-    # For LibreMesh: lime-config + wifi up already started the routing daemon
-    # via its proto handler, so only ensure dual-interface mode for bare OpenWrt
-    # (where the daemon was started in the case branch above but may not have
-    # picked up wlan0 if timing was off).
-    # For bare OpenWrt: re-verify the routing daemon has both interfaces.
-    if [[ "${has_lime_config}" != *"yes"* ]]; then
+    # Unified mesh daemon re-verify (runs for BOTH LibreMesh and bare OpenWrt).
+    # The LibreMesh path's inline babeld/bmx7 check above already repaired the
+    # daemon if it was missing or running on the wrong interface; this
+    # re-verify ensures the daemon has the correct dual-interface mode
+    # (wlan0 + br-lan when wlan0 is present, br-lan otherwise) by killing
+    # and restarting via start_mesh_daemon_on_vm. For bare OpenWrt this is
+    # the primary start path; for LibreMesh it's a safety re-bind.
+    if [[ "${mesh_proto}" != "none" ]]; then
         start_mesh_daemon_on_vm "$ip" "${mesh_proto}" || true
     fi
 
@@ -587,6 +792,7 @@ main() {
 
     # Phase -1: Reconfigure VM IPs if LibreMesh auto-assigned wrong subnet
     # LibreMesh images auto-configure 10.13.x.x; we need 10.99.0.x
+    phase_start "Phase -1: VM IP detection/repair"
     echo "=== Phase -1: Detecting VM IP configuration ==="
     local need_ip_fix=false
     for ip in "${NODE_IPS[@]}"; do
@@ -634,8 +840,10 @@ main() {
     else
         echo "  All VMs reachable at expected IPs."
     fi
+    phase_end
 
     # Phase 0: Wait for all VMs to be SSH-reachable
+    phase_start "Phase 0: Wait for SSH"
     echo "=== Phase 0: Waiting for VMs to boot ==="
     local idx=0
     local failed=0
@@ -646,6 +854,7 @@ main() {
         fi
         idx=$((idx + 1))
     done
+    phase_end
 
     if [ "$failed" -gt 0 ]; then
         echo ""
@@ -654,6 +863,7 @@ main() {
     fi
 
     # Phase 1: Basic configuration
+    phase_start "Phase 1: Per-VM LibreMesh config"
     echo ""
     echo "=== Phase 1: Configuring LibreMesh ==="
     idx=0
@@ -664,6 +874,7 @@ main() {
         configure_vm "$node_id" "$ip" "$hostname" "$mesh_mac"
         idx=$((idx + 1))
     done
+    phase_end
 
     # Configure thisnode.info on host (for discover-from-thisnode.sh)
     echo "Configuring thisnode.info resolution on host..."
@@ -678,9 +889,12 @@ main() {
     fi
 
     # Phase 2: SSH keys
+    phase_start "Phase 2: SSH key injection"
     generate_and_inject_keys
+    phase_end
 
     # Phase 3: Mesh convergence
+    phase_start "Phase 3: Mesh convergence"
     echo ""
     echo "=== Phase 3: Mesh convergence ==="
     local mesh_daemon="none"
@@ -697,10 +911,13 @@ main() {
         for ip in "${NODE_IPS[@]}"; do
             local expected_peers=$(( ${#NODE_IPS[@]} - 1 ))
             if [[ "${mesh_daemon}" == "babeld" ]]; then
+                # babeld baseline: daemon alive + UDP listener up.
+                # count_mesh_neighbors (common.sh) may return higher if the
+                # control socket or kernel routes confirm actual peers.
                 expected_peers=1
             fi
             local attempt=0
-            local max_attempts=18  # 90 seconds at 5s intervals
+            local max_attempts=24  # 120 seconds at 5s intervals (up from 90s)
             echo -n "  [${ip}] Waiting for ${expected_peers} ${mesh_daemon} peers..."
             while [ $attempt -lt $max_attempts ]; do
                 local peer_count
@@ -709,20 +926,55 @@ main() {
                         peer_count=$(ssh_vm "$ip" "bmx7 -c originators 2>/dev/null | tail -n +2 | wc -l" 2>/dev/null || echo "0")
                         ;;
                     babeld)
-                        # babeld has no built-in CLI for neighbour counts.
-                        # Match tests/qemu/common.sh:count_mesh_neighbors:
-                        # in this wired bridge topology, babeld convergence is
-                        # the UDP listener being up, not installed route count.
-                        peer_count=$(ssh_vm "$ip" "(netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -q babeld && echo 1 || echo 0" 2>/dev/null || echo "0")
+                        # Probe three independent signals and return the max:
+                        # 1. babeld control socket (if present) — authoritative
+                        # 2. kernel routes installed by babeld (proto babel)
+                        # 3. babeld PID + UDP listener up — weak baseline
+                        # The strongest signal wins. Mirrors the logic in
+                        # tests/qemu/common.sh:count_mesh_neighbors; inlined
+                        # here because configure-vms.sh does not source
+                        # common.sh (common.sh has test-suite-specific setup
+                        # like TAP). Keep the grep fallback as `|| true` so
+                        # the listener baseline is not double-counted when
+                        # the socket returns 0 neighbours.
+                        peer_count=$(ssh_vm "$ip" "
+                            pgrep -x babeld >/dev/null 2>&1 || { echo 0; exit 0; }
+                            sock=0
+                            for s in /var/run/babeld.sock /tmp/babeld.sock /var/run/babel/babeld.sock; do
+                                if [ -S \"\${s}\" ]; then
+                                    resp=\$(echo dump | nc -U -w 2 \"\${s}\" 2>/dev/null)
+                                    if [ -n \"\${resp}\" ]; then
+                                        # grep -c returns the count; exit 1 on 0
+                                        # matches (which still prints 0). Use
+                                        # || true so we don't trigger set -e in
+                                        # the remote shell, and the printed 0
+                                        # is the actual count.
+                                        sock=\$(echo \"\${resp}\" | grep -cE '^(add|change) neighbour ' || true)
+                                        sock=\$(echo \"\${sock}\" | head -1)
+                                        break
+                                    fi
+                                fi
+                            done
+                            routes=\$(ip route show proto babel 2>/dev/null | wc -l)
+                            listen=0
+                            if (netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -q babeld; then
+                                listen=1
+                            fi
+                            # Max of the three signals
+                            max=\${sock}
+                            [ \${routes} -gt \${max} ] && max=\${routes}
+                            [ \${listen} -gt \${max} ] && max=\${listen}
+                            echo \${max}
+                        " 2>/dev/null || echo "0")
                         ;;
                 esac
                 peer_count=$(echo "$peer_count" | tr -d '[:space:]')
-                if [ "${peer_count}" -ge "${expected_peers}" ] 2>/dev/null; then
-                    echo " OK (${peer_count} peers)"
+                if [ "${peer_count:-0}" -ge "${expected_peers}" ] 2>/dev/null; then
+                    echo " OK (${peer_count} signals)"
                     break
                 fi
                 if [ $attempt -eq $((max_attempts - 1)) ]; then
-                    echo " TIMEOUT (${peer_count}/${expected_peers} peers)"
+                    echo " TIMEOUT (${peer_count:-0}/${expected_peers} signals)"
                     convergence_ok=false
                 fi
                 sleep 5
@@ -730,14 +982,38 @@ main() {
             done
         done
 
+        # Definitive cross-node reachability check: ping a peer from node-1.
+        # count_mesh_neighbors can report "converged" when the daemon is up
+        # but isolated; an actual ping confirms L3 reachability across the
+        # shared bridge. NOTE: in a wired-bridge topology with static IPs
+        # on br-lan, a successful ping only proves L2/L3 reachability, not
+        # babeld neighbour exchange — but it IS the prerequisite for the
+        # multi-hop and mesh-protocol test suites to function.
+        if ${convergence_ok} && [ ${#NODE_IPS[@]} -ge 2 ]; then
+            local src_ip="${NODE_IPS[0]}"
+            local dst_ip="${NODE_IPS[1]}"
+            echo -n "  Cross-node reachability: ${src_ip} → ${dst_ip}... "
+            if ssh_vm "$src_ip" "ping -c 1 -W 5 ${dst_ip}" >/dev/null 2>&1; then
+                echo "OK"
+            else
+                echo "FAILED (mesh signals present but no L3 reachability)"
+                convergence_ok=false
+            fi
+        fi
+
         if ${convergence_ok}; then
             echo "  Mesh converged — all nodes see each other."
         else
             echo "  WARN: Mesh did not fully converge. Tests may still pass with partial connectivity."
+            # Dump diagnostics so the operator can debug without re-running.
+            # Always collect on convergence failure; the file is cheap to
+            # write and saves a debug cycle.
+            collect_diagnostics "Phase 3 convergence failed (${mesh_daemon})" || true
         fi
     else
         echo "  No mesh routing daemon found (bmx7/babeld) — skipping mesh convergence."
     fi
+    phase_end
 
     # Verification
     verify_key_access
@@ -753,6 +1029,70 @@ main() {
     echo " SSH key: ${SSH_KEY}"
     echo " Connect: ssh -i ${SSH_KEY} root@10.99.0.1{1,2,3,4}"
     echo "=========================================="
+
+    # On --debug, also dump a success-path diagnostic snapshot so the
+    # operator has a baseline to compare against on later runs.
+    if [[ "${DEBUG}" == "1" ]]; then
+        collect_diagnostics "DEBUG: success-path snapshot" || true
+    fi
 }
 
+# ─── Arg parsing ───
+# Enable verbose SSH output and per-phase timing with --debug or DEBUG=1.
+for arg in "$@"; do
+    case "${arg}" in
+        --debug)
+            DEBUG=1
+            echo "[debug] --debug flag set: enabling verbose SSH output and per-phase timing"
+            ;;
+        --help|-h)
+            cat << 'EOF'
+configure-vms.sh — Post-boot configuration for LibreMesh Lab VMs
+
+Usage: configure-vms.sh [--debug]
+
+Options:
+  --debug    Enable verbose SSH output and per-phase timing.
+             Equivalent to setting DEBUG=1 in the environment.
+  -h, --help Show this help.
+
+Environment:
+  DEBUG=1    Same as --debug.
+  QEMU_TIMEOUT_MULTIPLIER=N  Scale SSH/boot timeouts (default 1).
+EOF
+            exit 0
+            ;;
+    esac
+done
+
+# Strip recognized flags from $@ so main() never sees them.
+# Build a new positional-parameter array with only unknown args.
+_argv=()
+for _a in "$@"; do
+    case "${_a}" in
+        --debug) ;;   # already handled above
+        *)            _argv+=( "${_a}" ) ;;
+    esac
+done
+set -- "${_argv[@]}"
+unset _argv _a
+
+# On --debug, collect diagnostics on any non-zero exit (e.g. Phase 0
+# aborting because SSH is unreachable) so the operator has a snapshot
+# even when the run failed before reaching Phase 3. The EXIT trap uses
+# the exit code to distinguish success from failure: only non-zero
+# exits trigger the diagnostic dump, because the success path already
+# collects a snapshot at the end of main(). The trap is only active
+# when DEBUG=1 to avoid unnecessary work in normal runs.
+if [[ "${DEBUG}" == "1" ]]; then
+    _debug_dump_on_exit() {
+        local rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            collect_diagnostics "DEBUG: early-exit snapshot (exit ${rc})" 2>/dev/null || true
+        fi
+    }
+    trap '_debug_dump_on_exit' EXIT
+fi
+
 main "$@"
+

@@ -215,37 +215,76 @@ detect_mesh_protocol() {
 # For babeld, a "neighbor" is signaled by the daemon being alive and
 # exchanging hellos via the mesh interface. babeld over a wired bridge
 # with full L2 connectivity may install 0 kernel routes — the routes are
-# the bridge's job, not babeld's. We therefore return 1 when babeld is
-# running and the mesh interface is up, as the convergence signal in
-# this topology.
+# the bridge's job, not babeld's. We therefore probe three independent
+# signals and return the maximum plausible count (the strongest evidence
+# of actual peer discovery):
+#   1. babeld control socket (if present) — authoritative neighbour count
+#   2. kernel routing table entries installed by babeld (proto babel)
+#   3. babeld PID + UDP listener up — weak baseline (daemon alive but
+#      may be isolated)
+# Callers that need a definitive cross-node signal should use
+# `wait_for_mesh_ping` instead, which does an actual ping.
 count_mesh_neighbors() {
     local host="$1"
     local proto
     proto=$(detect_mesh_protocol "$host")
-    local count
+    local count=0
     case "${proto}" in
         bmx7)
             count=$(ssh_vm "$host" "bmx7 -c originators 2>/dev/null | tail -n +2 | wc -l" 2>/dev/null || echo 0)
             ;;
         babeld)
-            local babeld_pid babel_listen
+            local babeld_pid
             babeld_pid=$(ssh_vm "$host" "pgrep -x babeld" 2>/dev/null | head -1 | tr -d '[:space:]')
             if [ -z "${babeld_pid}" ]; then
                 count=0
             else
-                # Daemon is alive. Also confirm it's actually serving the babel
-                # protocol by checking the listening UDP socket (default 6696,
-                # may be overridden in /etc/babeld.conf via 'local-port'). This
-                # distinguishes "babeld is running with no config" from
-                # "babeld is up and serving". We deliberately do NOT count
-                # kernel routes: in a wired br-lan topology babeld legitimately
-                # installs 0 routes (L2 handles neighbor reachability).
+                # Signal 1: babeld control socket (if configured). OpenWrt's
+                # babeld init script writes the socket to /var/run/babeld.sock
+                # by default; some builds use /tmp/babeld.sock. The babeld
+                # control protocol is line-based; neighbour records are
+                # emitted as 'add neighbour ...' or 'change neighbour ...'
+                # on a `dump` request. We count only those lines so a dump
+                # with routes/interfaces but no neighbours returns 0.
+                local socket_count
+                socket_count=$(ssh_vm "$host" "
+                    for s in /var/run/babeld.sock /tmp/babeld.sock /var/run/babel/babeld.sock; do
+                        if [ -S \"\${s}\" ]; then
+                            resp=\$(echo dump | nc -U -w 2 \"\${s}\" 2>/dev/null)
+                            if [ -n \"\${resp}\" ]; then
+                                echo \"\${resp}\" | grep -cE '^(add|change) neighbour ' || true
+                                exit 0
+                            fi
+                        fi
+                    done
+                    echo 0
+                " 2>/dev/null | tr -d '[:space:]')
+                socket_count="${socket_count:-0}"
+
+                # Signal 2: kernel routes installed by babeld. In a wired
+                # br-lan topology babeld may install 0 routes (L2 handles
+                # reachability), but if it has discovered peers via
+                # multicast, it will install at least one route entry.
+                local route_count
+                route_count=$(ssh_vm "$host" "ip route show proto babel 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+                route_count="${route_count:-0}"
+
+                # Signal 3 (baseline): babeld PID + UDP listener up.
+                # Distinguishes "daemon alive and serving" from
+                # "daemon running with no config".
+                local listen_count=0
+                local babel_listen
                 babel_listen=$(ssh_vm "$host" "(netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | awk '/:/ && /babeld/ {print \$0}' | wc -l" 2>/dev/null | tr -d '[:space:]')
-                if [ "${babel_listen:-0}" -ge 1 ]; then
-                    count=1
-                else
-                    count=0
+                if [ "${babel_listen:-0}" -ge 1 ] 2>/dev/null; then
+                    listen_count=1
                 fi
+
+                # Return the maximum of all signals. This means a daemon
+                # with 0 socket entries and 0 kernel routes still returns
+                # 1 (the baseline) so the caller knows it's "up"; a daemon
+                # with 3 kernel routes returns 3, indicating real peers.
+                count=$(( socket_count > route_count ? socket_count : route_count ))
+                count=$(( count > listen_count ? count : listen_count ))
             fi
             ;;
         batman-adv)
@@ -259,6 +298,30 @@ count_mesh_neighbors() {
             ;;
     esac
     echo "${count}" | tr -d '[:space:]'
+}
+
+# Cross-node reachability check: ping a target IP from a source host
+# and return 0 if the ping succeeds within the timeout, 1 otherwise.
+# This confirms L3 reachability across the shared bridge. NOTE: in a
+# wired-bridge topology with static IPs on br-lan, a successful ping
+# only proves L2/L3 reachability, not babeld neighbour exchange — but
+# it IS the prerequisite for the multi-hop and mesh-protocol test
+# suites to function. Use this when count_mesh_neighbors is
+# inconclusive (e.g. babeld in a wired-bridge topology where the daemon
+# is up but you want to verify actual peer reachability).
+#
+# Args:
+#   $1 — source host (will run ping from here)
+#   $2 — target IP
+#   $3 — optional timeout in seconds (default 10)
+wait_for_mesh_ping() {
+    local src="$1"
+    local dst="$2"
+    local timeout="${3:-10}"
+    if ssh_vm "$src" "ping -c 3 -W ${timeout} ${dst}" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
 }
 
 # Restart the mesh routing protocol on a node.

@@ -152,6 +152,21 @@ setup_host_networking() {
     ip link add name "${BRIDGE_NAME}" type bridge 2>/dev/null || true
     ip link set "${BRIDGE_NAME}" type bridge stp_state 0
     ip link set "${BRIDGE_NAME}" type bridge forward_delay 0
+    # Disable multicast snooping so babeld's multicast hellos (and any other
+    # link-local multicast like mDNS, IPv6 ND) are flooded to all TAP
+    # ports. Without this, the bridge may suppress multicast to ports that
+    # haven't joined the relevant IGMP/MLD group, which breaks babeld
+    # neighbor discovery on a wired shared-L2 topology. multicast_snooping
+    # defaults to 1 on Linux bridges since ~3.x. The iproute2 spelling is
+    # `mcast_snooping`; the sysfs/exported name is `multicast_snooping`.
+    # Use explicit if/else so older iproute2 without this option does not
+    # break the lab (it just means multicast may be snooped, which still
+    # allows unicast convergence to succeed in many topologies).
+    if ip link set "${BRIDGE_NAME}" type bridge mcast_snooping 0 2>/dev/null; then
+        echo "  Bridge ${BRIDGE_NAME}: multicast snooping disabled"
+    else
+        echo "  WARN: could not disable multicast snooping on ${BRIDGE_NAME} (older iproute2?)"
+    fi
     ip addr add "${BRIDGE_IP}" dev "${BRIDGE_NAME}" 2>/dev/null || true
     ip link set "${BRIDGE_NAME}" up
 
