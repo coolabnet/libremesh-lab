@@ -8,8 +8,12 @@
 
 set -euo pipefail
 
+# Debug flag: --debug enables verbose SSH output and per-phase timing.
+DEBUG="${DEBUG:-0}"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${REPO_ROOT}/run"
+LOG_DIR="${RUN_DIR}/logs"
 TOPOLOGY_FILE="${REPO_ROOT}/config/topology.yaml"
 SSH_KEY_DIR="${RUN_DIR}/ssh-keys"
 SSH_KEY="${SSH_KEY_DIR}/id_ed25519"
@@ -135,6 +139,147 @@ start_mesh_daemon_on_vm() {
     " || true
 }
 
+# ─── Phase timing helper ───
+# Usage: phase_start "Phase 1 name"
+#        ... do work ...
+#        phase_end
+# When DEBUG=1, prints elapsed time for each phase. No-op when DEBUG=0
+# except for a single "phase ended" line that keeps output aligned.
+PHASE_START_EPOCH=0
+phase_start() {
+    if [[ "${DEBUG}" == "1" ]]; then
+        echo "  [phase] start: $*"
+    fi
+    PHASE_START_EPOCH=$(date +%s)
+}
+phase_end() {
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$(( now - PHASE_START_EPOCH ))
+    if [[ "${DEBUG}" == "1" ]]; then
+        echo "  [phase] end: ${elapsed}s"
+    fi
+    PHASE_START_EPOCH=0
+}
+
+# ─── Diagnostic dump ───
+# When mesh convergence fails, collect per-node diagnostics
+# and write to run/logs/convergence-diagnostics.log. This is the first
+# place to look when the testbed fails to converge: it shows whether IPs
+# are assigned, interfaces are up, UCI configs are correct, the mesh
+# daemon is running, and what netifd/babeld logged.
+# Also called unconditionally with --debug so the operator has a snapshot
+# even on a successful run.
+collect_diagnostics() {
+    local reason="${1:-unspecified}"
+    mkdir -p "${LOG_DIR}"
+    local diag_file="${LOG_DIR}/convergence-diagnostics.log"
+    local ts
+    ts=$(date -Iseconds 2>/dev/null || date)
+
+    {
+        echo "=========================================="
+        echo " Convergence diagnostics: ${reason}"
+        echo " Timestamp: ${ts}"
+        echo " Lab: ${REPO_ROOT}"
+        echo "=========================================="
+        echo ""
+
+        local idx=0
+        for ip in "${NODE_IPS[@]}"; do
+            local hostname="${NODE_HOSTNAMES[$idx]}"
+            echo "--- Node ${hostname} (${ip}) ---"
+            echo ""
+
+            # Only run diagnostic commands if the host is reachable; mark
+            # the section "(unreachable)" otherwise so it's clear which
+            # nodes we couldn't even SSH into.
+            if ! ssh_vm "$ip" "echo reachable" &>/dev/null; then
+                echo "(unreachable via SSH)"
+                echo ""
+                idx=$((idx + 1))
+                continue
+            fi
+
+            echo "[ip addr show]"
+            ssh_vm "$ip" "ip addr show 2>/dev/null" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[ip link show]"
+            ssh_vm "$ip" "ip link show 2>/dev/null" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[ip route show]"
+            ssh_vm "$ip" "ip route show 2>/dev/null" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[/etc/config/network]"
+            ssh_vm "$ip" "cat /etc/config/network 2>/dev/null" 2>/dev/null || echo "  (file not present)"
+            echo ""
+
+            echo "[/etc/config/babeld]"
+            ssh_vm "$ip" "cat /etc/config/babeld 2>/dev/null" 2>/dev/null || echo "  (file not present)"
+            echo ""
+
+            echo "[ps: babeld/bmx7/batmand]"
+            ssh_vm "$ip" "ps -w 2>/dev/null | grep -E 'babeld|bmx7|batmand' | grep -v grep" 2>/dev/null || echo "  (none running)"
+            echo ""
+
+            echo "[UDP listeners: babeld]"
+            ssh_vm "$ip" "(netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -E 'babeld|bmx7' || echo '  (none)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[kernel routes: proto babel]"
+            ssh_vm "$ip" "ip route show proto babel 2>/dev/null || echo '  (none)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[logread: babeld (last 20)]"
+            ssh_vm "$ip" "logread 2>/dev/null | grep -i babeld | tail -20 || echo '  (no logread / no babeld entries)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[logread: netifd (last 20)]"
+            ssh_vm "$ip" "logread 2>/dev/null | grep -i netifd | tail -20 || echo '  (no logread / no netifd entries)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[logread: lime-config (last 20)]"
+            ssh_vm "$ip" "logread 2>/dev/null | grep -i lime | tail -20 || echo '  (no logread / no lime entries)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            echo "[/etc/rc.local (first 40 lines)]"
+            ssh_vm "$ip" "head -40 /etc/rc.local 2>/dev/null || echo '  (no rc.local)'" 2>/dev/null || echo "  (command failed)"
+            echo ""
+
+            idx=$((idx + 1))
+        done
+
+        echo "--- Host bridge state ---"
+        echo ""
+        echo "[ip link show ${BRIDGE_NAME}]"
+        ip link show "${BRIDGE_NAME}" 2>/dev/null || echo "  (bridge not present)"
+        echo ""
+        echo "[bridge link show]"
+        bridge link show 2>/dev/null || echo "  (bridge command unavailable)"
+        echo ""
+        echo "[dnsmasq leases]"
+        if [ -f "${RUN_DIR}/dnsmasq-dhcp.leases" ]; then
+            cat "${RUN_DIR}/dnsmasq-dhcp.leases" 2>/dev/null
+        elif [ -f /var/lib/misc/dnsmasq.leases ]; then
+            cat /var/lib/misc/dnsmasq.leases 2>/dev/null
+        else
+            echo "  (no leases file found)"
+        fi
+        echo ""
+    } > "${diag_file}" 2>&1
+
+    echo "  Diagnostics written to: ${diag_file}"
+    if [[ "${DEBUG}" != "1" ]]; then
+        # Surface a short summary on the console so the user can decide
+        # whether to look at the full log.
+        echo "  First 20 lines:"
+        head -20 "${diag_file}" | sed 's/^/    /'
+    fi
+}
+
 # ─── SSH helper ───
 # Tries key auth first (if SSH key exists), falls back to password auth.
 # This makes the script work with both source-built (pre-baked keys) and
@@ -155,37 +300,52 @@ ssh_vm() {
     local target
     target="$(ssh_target "${ip}")"
 
+    # Helper: run an SSH command and return 0 if it succeeds, 1 otherwise.
+    # In DEBUG=1 mode, SSH stderr is surfaced so connection/auth failures
+    # are visible. In default mode, SSH stderr is suppressed to keep the
+    # operator output clean. We do NOT use a ${var} placeholder for the
+    # redirect because unquoted expansion of a string like "2>/dev/null"
+    # would pass it as an SSH argument instead of a shell redirect.
+    _ssh_vm_try() {
+        # Args: ssh command (array-style: the caller uses "$@" to pass them)
+        if [[ "${DEBUG}" == "1" ]]; then
+            "$@" 2>&1
+        else
+            "$@" 2>/dev/null
+        fi
+    }
+
     # Try key-based auth first when key file exists (source-built images)
     if [[ -f "${SSH_KEY}" ]]; then
-        ssh -o StrictHostKeyChecking=no \
+        _ssh_vm_try ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o HostKeyAlgorithms=+ssh-rsa \
             -o BatchMode=yes \
             -o IdentitiesOnly=yes \
             -i "${SSH_KEY}" \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "${target}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" && return 0
     fi
 
     # Fallback: password auth via sshpass (empty password for source-built images)
     # Use PreferredAuthentications=password to avoid "none" auth masking key issues
     if command -v sshpass >/dev/null 2>&1; then
-        sshpass -p "" ssh -o StrictHostKeyChecking=no \
+        _ssh_vm_try sshpass -p "" ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o HostKeyAlgorithms=+ssh-rsa \
             -o PreferredAuthentications=password \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "${target}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" && return 0
     fi
 
     # Last resort: try with password "root" (for prebuilt images)
     if command -v sshpass >/dev/null 2>&1; then
-        sshpass -p "root" ssh -o StrictHostKeyChecking=no \
+        _ssh_vm_try sshpass -p "root" ssh -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             -o HostKeyAlgorithms=+ssh-rsa \
             -o PreferredAuthentications=password \
             -o ConnectTimeout="${SSH_BASE_TIMEOUT}" \
-            "${target}" "$@" 2>/dev/null && return 0
+            "${target}" "$@" && return 0
     fi
 
     return 1
@@ -627,6 +787,7 @@ main() {
 
     # Phase -1: Reconfigure VM IPs if LibreMesh auto-assigned wrong subnet
     # LibreMesh images auto-configure 10.13.x.x; we need 10.99.0.x
+    phase_start "Phase -1: VM IP detection/repair"
     echo "=== Phase -1: Detecting VM IP configuration ==="
     local need_ip_fix=false
     for ip in "${NODE_IPS[@]}"; do
@@ -674,8 +835,10 @@ main() {
     else
         echo "  All VMs reachable at expected IPs."
     fi
+    phase_end
 
     # Phase 0: Wait for all VMs to be SSH-reachable
+    phase_start "Phase 0: Wait for SSH"
     echo "=== Phase 0: Waiting for VMs to boot ==="
     local idx=0
     local failed=0
@@ -686,6 +849,7 @@ main() {
         fi
         idx=$((idx + 1))
     done
+    phase_end
 
     if [ "$failed" -gt 0 ]; then
         echo ""
@@ -694,6 +858,7 @@ main() {
     fi
 
     # Phase 1: Basic configuration
+    phase_start "Phase 1: Per-VM LibreMesh config"
     echo ""
     echo "=== Phase 1: Configuring LibreMesh ==="
     idx=0
@@ -704,6 +869,7 @@ main() {
         configure_vm "$node_id" "$ip" "$hostname" "$mesh_mac"
         idx=$((idx + 1))
     done
+    phase_end
 
     # Configure thisnode.info on host (for discover-from-thisnode.sh)
     echo "Configuring thisnode.info resolution on host..."
@@ -718,9 +884,12 @@ main() {
     fi
 
     # Phase 2: SSH keys
+    phase_start "Phase 2: SSH key injection"
     generate_and_inject_keys
+    phase_end
 
     # Phase 3: Mesh convergence
+    phase_start "Phase 3: Mesh convergence"
     echo ""
     echo "=== Phase 3: Mesh convergence ==="
     local mesh_daemon="none"
@@ -831,10 +1000,15 @@ main() {
             echo "  Mesh converged — all nodes see each other."
         else
             echo "  WARN: Mesh did not fully converge. Tests may still pass with partial connectivity."
+            # Dump diagnostics so the operator can debug without re-running.
+            # Always collect on convergence failure; the file is cheap to
+            # write and saves a debug cycle.
+            collect_diagnostics "Phase 3 convergence failed (${mesh_daemon})" || true
         fi
     else
         echo "  No mesh routing daemon found (bmx7/babeld) — skipping mesh convergence."
     fi
+    phase_end
 
     # Verification
     verify_key_access
@@ -850,6 +1024,58 @@ main() {
     echo " SSH key: ${SSH_KEY}"
     echo " Connect: ssh -i ${SSH_KEY} root@10.99.0.1{1,2,3,4}"
     echo "=========================================="
+
+    # On --debug, also dump a success-path diagnostic snapshot so the
+    # operator has a baseline to compare against on later runs.
+    if [[ "${DEBUG}" == "1" ]]; then
+        collect_diagnostics "DEBUG: success-path snapshot" || true
+    fi
 }
 
+# ─── Arg parsing ───
+# Enable verbose SSH output and per-phase timing with --debug or DEBUG=1.
+for arg in "$@"; do
+    case "${arg}" in
+        --debug)
+            DEBUG=1
+            echo "[debug] --debug flag set: enabling verbose SSH output and per-phase timing"
+            ;;
+        --help|-h)
+            cat << 'EOF'
+configure-vms.sh — Post-boot configuration for LibreMesh Lab VMs
+
+Usage: configure-vms.sh [--debug]
+
+Options:
+  --debug    Enable verbose SSH output and per-phase timing.
+             Equivalent to setting DEBUG=1 in the environment.
+  -h, --help Show this help.
+
+Environment:
+  DEBUG=1    Same as --debug.
+  QEMU_TIMEOUT_MULTIPLIER=N  Scale SSH/boot timeouts (default 1).
+EOF
+            exit 0
+            ;;
+    esac
+done
+
+# On --debug, collect diagnostics on any non-zero exit (e.g. Phase 0
+# aborting because SSH is unreachable) so the operator has a snapshot
+# even when the run failed before reaching Phase 3. The EXIT trap uses
+# the exit code to distinguish success from failure: only non-zero
+# exits trigger the diagnostic dump, because the success path already
+# collects a snapshot at the end of main(). The trap is only active
+# when DEBUG=1 to avoid unnecessary work in normal runs.
+if [[ "${DEBUG}" == "1" ]]; then
+    _debug_dump_on_exit() {
+        local rc=$?
+        if [ "${rc}" -ne 0 ]; then
+            collect_diagnostics "DEBUG: early-exit snapshot (exit ${rc})" 2>/dev/null || true
+        fi
+    }
+    trap '_debug_dump_on_exit' EXIT
+fi
+
 main "$@"
+
