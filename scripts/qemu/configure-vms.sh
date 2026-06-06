@@ -274,6 +274,17 @@ configure_vm() {
     local has_lime_config
     has_lime_config=$(ssh_vm "$ip" "which lime-config 2>/dev/null && echo yes || echo no") || has_lime_config="no"
 
+    # Detect which mesh routing protocol is available. Order matches
+    # tests/qemu/common.sh:detect_mesh_protocol: babeld > bmx7. Used by both
+    # the LibreMesh (post-lime-config repair) and bare-OpenWrt paths, and
+    # by the unified re-verify block at the end of configure_vm.
+    local mesh_proto="none"
+    if ssh_vm "$ip" "which babeld >/dev/null 2>&1" 2>/dev/null; then
+        mesh_proto="babeld"
+    elif ssh_vm "$ip" "which bmx7 >/dev/null 2>&1" 2>/dev/null; then
+        mesh_proto="bmx7"
+    fi
+
     if [[ "${has_lime_config}" == *"yes"* ]]; then
         echo "  [${hostname}] Full LibreMesh detected, using lime-config..."
 
@@ -318,19 +329,62 @@ configure_vm() {
             sleep 7 && \
             wifi up
         " || echo "  [${hostname}] WARN: lime-config sequence had errors"
+
+        # Post-lime-config verification: the rc.local in the image already
+        # rewrote /etc/config/network to DHCP-on-br-lan and started babeld,
+        # but lime-config may have re-clobbered either one. Verify and repair
+        # here over SSH (the rc.local runs before SSH is up, so this is the
+        # authoritative safety net).
+        echo "  [${hostname}] Verifying post-lime-config network state..."
+        local brlan_ip
+        brlan_ip=$(ssh_vm "$ip" "ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print \$2; exit}'" 2>/dev/null) || brlan_ip=""
+        if [[ -z "${brlan_ip}" || "${brlan_ip}" != "${ip}/"* ]]; then
+            echo "  [${hostname}] WARN: br-lan has wrong IP ('${brlan_ip:-none}'), re-applying testbed network config"
+            ssh_vm "$ip" "
+                uci -q delete network.lan 2>/dev/null
+                uci -q delete network.br_lan 2>/dev/null
+                uci set network.br_lan=device
+                uci set network.br_lan.name='br-lan'
+                uci set network.br_lan.type='bridge'
+                uci add_list network.br_lan.ports='eth0'
+                uci set network.lan=interface
+                uci set network.lan.device='br-lan'
+                uci set network.lan.proto='static'
+                uci set network.lan.ipaddr='${ip}'
+                uci set network.lan.netmask='255.255.0.0'
+                uci set network.lan.gateway='10.99.0.254'
+                uci set network.lan.metric='100'
+                uci commit network
+                /etc/init.d/network restart >/tmp/network-restart.log 2>&1 || true
+            " || echo "  [${hostname}] WARN: post-lime network repair failed"
+            # Re-apply the IP immediately so subsequent SSH commands in this
+            # function (and Phase 2/3) can reach the VM at the expected IP.
+            ssh_vm "$ip" "ip addr replace ${ip}/16 dev br-lan 2>/dev/null || true" || true
+        fi
+
+        # Ensure babeld is running on br-lan. The rc.local should have done
+        # this, but lime-config may have killed it or pointed it at a VLAN
+        # interface. Verify via pgrep + UDP listener (matches the convergence
+        # signal in tests/qemu/common.sh:count_mesh_neighbors).
+        if [[ "${mesh_proto}" == "babeld" ]]; then
+            local babeld_ok
+            babeld_ok=$(ssh_vm "$ip" "pgrep -x babeld >/dev/null 2>&1 && (netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -q babeld && echo yes || echo no" 2>/dev/null | tr -d '[:space:]')
+            if [[ "${babeld_ok}" != "yes" ]]; then
+                echo "  [${hostname}] babeld not listening, restarting..."
+                if ssh_vm "$ip" "[ -x /etc/init.d/babeld ]" 2>/dev/null; then
+                    ssh_vm "$ip" "/etc/init.d/babeld enable 2>/dev/null; /etc/init.d/babeld restart 2>/dev/null || babeld -D -I /var/run/babeld.pid br-lan 2>/dev/null &" || true
+                else
+                    ssh_vm "$ip" "killall babeld 2>/dev/null; babeld -D -I /var/run/babeld.pid br-lan 2>/dev/null &" || true
+                fi
+            fi
+        elif [[ "${mesh_proto}" == "bmx7" ]]; then
+            if ! ssh_vm "$ip" "pgrep -x bmx7 >/dev/null 2>&1" 2>/dev/null; then
+                echo "  [${hostname}] bmx7 not running, starting..."
+                ssh_vm "$ip" "killall bmx7 2>/dev/null; bmx7 dev=br-lan 2>/dev/null &" || true
+            fi
+        fi
     else
         echo "  [${hostname}] Bare OpenWrt detected (no lime-config), configuring mesh routing directly..."
-
-        # Detect available routing protocol. Order matches
-        # tests/qemu/common.sh:detect_mesh_protocol and the unstaged
-        # default: babeld > bmx7. (Pre-babeld images may still ship bmx7;
-        # we keep the bmx7 branch as a fallback.)
-        local mesh_proto="none"
-        if ssh_vm "$ip" "which babeld >/dev/null 2>&1" 2>/dev/null; then
-            mesh_proto="babeld"
-        elif ssh_vm "$ip" "which bmx7 >/dev/null 2>&1" 2>/dev/null; then
-            mesh_proto="bmx7"
-        fi
 
         # Start vwifi-client if vwifi is installed.
         # vwifi-client --number N creates PHY radios via mac80211_hwsim netlink,
@@ -387,30 +441,16 @@ configure_vm() {
         else
             echo "  [${hostname}] WARN: wlan0 not available, using wired br-lan fallback"
         fi
-
-        # Configure and start mesh routing protocol.
-        # Use BOTH wlan0 and br-lan when wlan0 is available:
-        #   - wlan0 provides the WiFi/IBSS simulation for adapter testing
-        #   - br-lan ensures convergence (vwifi IBSS forwards beacons
-        #     but not data frames, so routing protocol needs the wired path)
-        # start_mesh_daemon_on_vm (defined below) is reused by the
-        # re-verify block to avoid duplicating the kill/if-wlan0 dance.
-        case "${mesh_proto}" in
-            bmx7|babeld)
-                start_mesh_daemon_on_vm "$ip" "${mesh_proto}" || true
-                ;;
-            *)
-                echo "  [${hostname}] WARN: No mesh routing protocol found (bmx7/babeld)"
-                ;;
-        esac
     fi
 
-    # For LibreMesh: lime-config + wifi up already started the routing daemon
-    # via its proto handler, so only ensure dual-interface mode for bare OpenWrt
-    # (where the daemon was started in the case branch above but may not have
-    # picked up wlan0 if timing was off).
-    # For bare OpenWrt: re-verify the routing daemon has both interfaces.
-    if [[ "${has_lime_config}" != *"yes"* ]]; then
+    # Unified mesh daemon re-verify (runs for BOTH LibreMesh and bare OpenWrt).
+    # The LibreMesh path's inline babeld/bmx7 check above already repaired the
+    # daemon if it was missing or running on the wrong interface; this
+    # re-verify ensures the daemon has the correct dual-interface mode
+    # (wlan0 + br-lan when wlan0 is present, br-lan otherwise) by killing
+    # and restarting via start_mesh_daemon_on_vm. For bare OpenWrt this is
+    # the primary start path; for LibreMesh it's a safety re-bind.
+    if [[ "${mesh_proto}" != "none" ]]; then
         start_mesh_daemon_on_vm "$ip" "${mesh_proto}" || true
     fi
 
