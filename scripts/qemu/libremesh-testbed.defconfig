@@ -15,4 +15,8 @@ CONFIG_PACKAGE_netcat=y
 CONFIG_PACKAGE_iw=y
 CONFIG_PACKAGE_lime-system=y
 CONFIG_PACKAGE_lime-proto-bmx7=y
+# lime-proto-babeld is needed for lime-config to wire babeld as a mesh
+# routing protocol. Without it, lime-config silently falls back to bmx7
+# even when the image has babeld installed.
+CONFIG_PACKAGE_lime-proto-babeld=y
 CONFIG_CCACHE=y
