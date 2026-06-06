@@ -301,15 +301,20 @@ ssh_vm() {
     target="$(ssh_target "${ip}")"
 
     # Helper: run an SSH command and return 0 if it succeeds, 1 otherwise.
-    # In DEBUG=1 mode, SSH stderr is surfaced so connection/auth failures
-    # are visible. In default mode, SSH stderr is suppressed to keep the
-    # operator output clean. We do NOT use a ${var} placeholder for the
-    # redirect because unquoted expansion of a string like "2>/dev/null"
-    # would pass it as an SSH argument instead of a shell redirect.
+    # In DEBUG=1 mode, SSH stderr flows to the terminal (fd 2) so
+    # connection/auth failures are visible. In default mode, stderr
+    # is suppressed. We do NOT merge stderr into stdout (2>&1)
+    # because callers capture stdout in command substitutions;
+    # merging would pollute parsed output with diagnostic noise.
     _ssh_vm_try() {
         # Args: ssh command (array-style: the caller uses "$@" to pass them)
+        # In DEBUG=1 mode, SSH stderr flows to the terminal (fd 2) so
+        # connection/auth failures are visible. In default mode, stderr
+        # is suppressed. We do NOT merge stderr into stdout (2>&1)
+        # because callers capture stdout in command substitutions;
+        # merging would pollute parsed output with diagnostic noise.
         if [[ "${DEBUG}" == "1" ]]; then
-            "$@" 2>&1
+            "$@"
         else
             "$@" 2>/dev/null
         fi
@@ -1059,6 +1064,18 @@ EOF
             ;;
     esac
 done
+
+# Strip recognized flags from $@ so main() never sees them.
+# Build a new positional-parameter array with only unknown args.
+_argv=()
+for _a in "$@"; do
+    case "${_a}" in
+        --debug) ;;   # already handled above
+        *)            _argv+=( "${_a}" ) ;;
+    esac
+done
+set -- "${_argv[@]}"
+unset _argv _a
 
 # On --debug, collect diagnostics on any non-zero exit (e.g. Phase 0
 # aborting because SSH is unreachable) so the operator has a snapshot
