@@ -737,10 +737,13 @@ main() {
         for ip in "${NODE_IPS[@]}"; do
             local expected_peers=$(( ${#NODE_IPS[@]} - 1 ))
             if [[ "${mesh_daemon}" == "babeld" ]]; then
+                # babeld baseline: daemon alive + UDP listener up.
+                # count_mesh_neighbors (common.sh) may return higher if the
+                # control socket or kernel routes confirm actual peers.
                 expected_peers=1
             fi
             local attempt=0
-            local max_attempts=18  # 90 seconds at 5s intervals
+            local max_attempts=24  # 120 seconds at 5s intervals (up from 90s)
             echo -n "  [${ip}] Waiting for ${expected_peers} ${mesh_daemon} peers..."
             while [ $attempt -lt $max_attempts ]; do
                 local peer_count
@@ -749,26 +752,80 @@ main() {
                         peer_count=$(ssh_vm "$ip" "bmx7 -c originators 2>/dev/null | tail -n +2 | wc -l" 2>/dev/null || echo "0")
                         ;;
                     babeld)
-                        # babeld has no built-in CLI for neighbour counts.
-                        # Match tests/qemu/common.sh:count_mesh_neighbors:
-                        # in this wired bridge topology, babeld convergence is
-                        # the UDP listener being up, not installed route count.
-                        peer_count=$(ssh_vm "$ip" "(netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -q babeld && echo 1 || echo 0" 2>/dev/null || echo "0")
+                        # Probe three independent signals and return the max:
+                        # 1. babeld control socket (if present) — authoritative
+                        # 2. kernel routes installed by babeld (proto babel)
+                        # 3. babeld PID + UDP listener up — weak baseline
+                        # The strongest signal wins. Mirrors the logic in
+                        # tests/qemu/common.sh:count_mesh_neighbors; inlined
+                        # here because configure-vms.sh does not source
+                        # common.sh (common.sh has test-suite-specific setup
+                        # like TAP). Keep the grep fallback as `|| true` so
+                        # the listener baseline is not double-counted when
+                        # the socket returns 0 neighbours.
+                        peer_count=$(ssh_vm "$ip" "
+                            pgrep -x babeld >/dev/null 2>&1 || { echo 0; exit 0; }
+                            sock=0
+                            for s in /var/run/babeld.sock /tmp/babeld.sock /var/run/babel/babeld.sock; do
+                                if [ -S \"\${s}\" ]; then
+                                    resp=\$(echo dump | nc -U -w 2 \"\${s}\" 2>/dev/null)
+                                    if [ -n \"\${resp}\" ]; then
+                                        # grep -c returns the count; exit 1 on 0
+                                        # matches (which still prints 0). Use
+                                        # || true so we don't trigger set -e in
+                                        # the remote shell, and the printed 0
+                                        # is the actual count.
+                                        sock=\$(echo \"\${resp}\" | grep -cE '^(add|change) neighbour ' || true)
+                                        sock=\$(echo \"\${sock}\" | head -1)
+                                        break
+                                    fi
+                                fi
+                            done
+                            routes=\$(ip route show proto babel 2>/dev/null | wc -l)
+                            listen=0
+                            if (netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -q babeld; then
+                                listen=1
+                            fi
+                            # Max of the three signals
+                            max=\${sock}
+                            [ \${routes} -gt \${max} ] && max=\${routes}
+                            [ \${listen} -gt \${max} ] && max=\${listen}
+                            echo \${max}
+                        " 2>/dev/null || echo "0")
                         ;;
                 esac
                 peer_count=$(echo "$peer_count" | tr -d '[:space:]')
-                if [ "${peer_count}" -ge "${expected_peers}" ] 2>/dev/null; then
-                    echo " OK (${peer_count} peers)"
+                if [ "${peer_count:-0}" -ge "${expected_peers}" ] 2>/dev/null; then
+                    echo " OK (${peer_count} signals)"
                     break
                 fi
                 if [ $attempt -eq $((max_attempts - 1)) ]; then
-                    echo " TIMEOUT (${peer_count}/${expected_peers} peers)"
+                    echo " TIMEOUT (${peer_count:-0}/${expected_peers} signals)"
                     convergence_ok=false
                 fi
                 sleep 5
                 attempt=$((attempt + 1))
             done
         done
+
+        # Definitive cross-node reachability check: ping a peer from node-1.
+        # count_mesh_neighbors can report "converged" when the daemon is up
+        # but isolated; an actual ping confirms L3 reachability across the
+        # shared bridge. NOTE: in a wired-bridge topology with static IPs
+        # on br-lan, a successful ping only proves L2/L3 reachability, not
+        # babeld neighbour exchange — but it IS the prerequisite for the
+        # multi-hop and mesh-protocol test suites to function.
+        if ${convergence_ok} && [ ${#NODE_IPS[@]} -ge 2 ]; then
+            local src_ip="${NODE_IPS[0]}"
+            local dst_ip="${NODE_IPS[1]}"
+            echo -n "  Cross-node reachability: ${src_ip} → ${dst_ip}... "
+            if ssh_vm "$src_ip" "ping -c 1 -W 5 ${dst_ip}" >/dev/null 2>&1; then
+                echo "OK"
+            else
+                echo "FAILED (mesh signals present but no L3 reachability)"
+                convergence_ok=false
+            fi
+        fi
 
         if ${convergence_ok}; then
             echo "  Mesh converged — all nodes see each other."
