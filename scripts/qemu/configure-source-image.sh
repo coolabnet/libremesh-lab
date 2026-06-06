@@ -216,6 +216,209 @@ if [[ -f "${MOUNT_POINT}/etc/config/dropbear" ]]; then
     fi
 fi
 
+# ─── Pre-create babeld UCI config (defense in depth) ───────────────────────────
+# lime-config may set up babeld to run on VLAN interfaces that don't exist in
+# the QEMU testbed. Pre-create a minimal babeld config that runs on br-lan so
+# that even if rc.local fails, babeld has a valid autostart configuration.
+# OpenWrt babeld's documented UCI shape:
+#   config general    — global settings (no enabled flag; babeld is enabled
+#                       by the /etc/init.d/babeld init script, controlled
+#                       via /etc/rc.d/S*babeld symlink)
+#   config interface  — one per interface babeld should run on
+BABELD_CONFIG="${MOUNT_POINT}/etc/config/babeld"
+if [[ ! -f "${BABELD_CONFIG}" ]] || ! sudo grep -q "br-lan" "${BABELD_CONFIG}"; then
+    log "  Pre-creating /etc/config/babeld with br-lan interface..."
+    sudo tee "${BABELD_CONFIG}" > /dev/null << 'BABELDEOF'
+config general
+
+config interface
+	option 'ifname' 'br-lan'
+BABELDEOF
+    # Enable babeld init script (rc.d symlink) so it auto-starts on subsequent boots
+    if [[ -f "${MOUNT_POINT}/etc/init.d/babeld" ]]; then
+        sudo mkdir -p "${MOUNT_POINT}/etc/rc.d"
+        if ! ls "${MOUNT_POINT}/etc/rc.d"/S*babeld >/dev/null 2>&1; then
+            sudo ln -sf "../init.d/babeld" "${MOUNT_POINT}/etc/rc.d/S60babeld"
+        fi
+    fi
+fi
+
+# ─── Override LibreMesh networking via rc.local ────────────────────────────────
+# LibreMesh's lime-config regenerates /etc/config/network at first boot with
+# VLAN-tagged batman-adv interfaces that don't work with the QEMU testbed bridge.
+# Strategy: let LibreMesh boot normally (preserving lime-services like
+# thisnode.info and shared-state), then use rc.local (runs after all init
+# scripts and uci-defaults) to rewrite the network config to plain DHCP on
+# br-lan and restart netifd + babeld. This is the same wired-bridge approach
+# the bare-OpenWrt path uses in configure-vms.sh.
+log "  Injecting rc.local testbed override..."
+
+# Re-enable all uci-defaults (undo any previous disabling) so lime-config runs.
+for f in "${MOUNT_POINT}/etc/uci-defaults/"*; do
+    [[ -f "$f" ]] || continue
+    sudo chmod +x "$f" 2>/dev/null || true
+done
+# Restore lime-config if it was renamed/disabled
+if [[ -f "${MOUNT_POINT}/etc/uci-defaults/91_lime-config.disabled" ]]; then
+    sudo mv "${MOUNT_POINT}/etc/uci-defaults/91_lime-config.disabled" \
+             "${MOUNT_POINT}/etc/uci-defaults/91_lime-config" 2>/dev/null || true
+fi
+log "  Re-enabled all LibreMesh uci-defaults"
+
+# Write rc.local. This runs LAST, after all init scripts and uci-defaults.
+# Uses UCI/netifd (not raw ip/udhcpc) so network state stays consistent.
+# Atomically replaces /etc/config/network (instead of section-by-section
+# deletion) to avoid leaving dangling references to lime-config VLANs.
+# The marker file is only created after the mesh daemon is verified
+# listening, so a failed first boot will retry on the next boot.
+sudo tee "${MOUNT_POINT}/etc/rc.local" > /dev/null << 'RCLOCALEOF'
+#!/bin/sh
+# /etc/rc.local — LibreMesh Lab testbed override
+# Runs after all init scripts and uci-defaults. Overrides lime-config's
+# network (VLAN-tagged batman-adv) with a plain DHCP-on-br-lan setup that
+# works on the QEMU testbed bridge. Idempotent via the marker file.
+
+MARKER="/etc/.mesha-testbed-configured"
+[ -f "${MARKER}" ] && exit 0
+
+# Wait for uci-defaults (including 91_lime-config) to finish.
+# uci-defaults scripts remove themselves after run, so a non-empty
+# directory means some are still pending. Timeout: 120s.
+WAIT=0
+while [ -n "$(ls /etc/uci-defaults/ 2>/dev/null)" ] && [ ${WAIT} -lt 120 ]; do
+    sleep 1
+    WAIT=$((WAIT + 1))
+done
+
+# Stop any mesh daemons that lime-config may have started on the wrong
+# interface. They will be restarted on br-lan below.
+killall babeld bmx7 batmand 2>/dev/null || true
+sleep 1
+
+# Stop netifd so it doesn't hold a lock on /etc/config/network while we
+# rewrite it. /etc/init.d/network restart is not enough — netifd caches the
+# config in memory and a hot-rewrite can produce an inconsistent state.
+/etc/init.d/network stop 2>/dev/null || true
+sleep 1
+
+# Atomically replace /etc/config/network with a known-good testbed config.
+# This avoids the index-shifting problem of section-by-section deletion
+# (anonymous @device[0], @interface[0] reindex while deleting) and
+# guarantees no stale VLAN/batman references remain. lime-config's network
+# config is preserved as .lime-config.bak in case we need to inspect it.
+# Use temp files in /etc/config (same filesystem) + mv for true atomicity;
+# /tmp is tmpfs on OpenWrt so a /tmp→/etc/config mv would degrade to
+# copy/unlink and break the atomic-replace guarantee.
+cp -f /etc/config/network /etc/config/network.lime-config.bak 2>/dev/null || true
+cat > /etc/config/.network.new << 'NETEOF'
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config globals 'globals'
+	option ula_prefix 'fd00:dead:beef::/48'
+
+config device
+	option name 'br-lan'
+	option type 'bridge'
+	list ports 'eth0'
+
+config interface 'lan'
+	option device 'br-lan'
+	option proto 'dhcp'
+	option metric '100'
+NETEOF
+mv -f /etc/config/.network.new /etc/config/network
+
+# Replace /etc/config/babeld so the init script can manage babeld on
+# subsequent boots (lime-config may have pointed it at a VLAN interface).
+cat > /etc/config/.babeld.new << 'BABELDEOF'
+config general
+
+config interface
+	option ifname 'br-lan'
+BABELDEOF
+mv -f /etc/config/.babeld.new /etc/config/babeld
+
+# Restart networking. /etc/init.d/network start will pick up the new
+# /etc/config/network and bring up br-lan, then DHCP via udhcpc.
+# Restart in background and wait for br-lan to actually come up before
+# starting the mesh daemon.
+(/etc/init.d/network start) >/tmp/network-start.log 2>&1 &
+
+# Wait up to 30s for br-lan to be UP and RUNNING. We require both: the
+# interface must exist AND its link state must be UP (not DOWN or UNKNOWN).
+# If this times out, the mesh daemon start below is still attempted as a
+# best-effort, but the marker gating at the end will refuse to mark the
+# boot as configured, so the next boot retries.
+BRLAN_UP=0
+WAIT_BR=0
+while [ ${WAIT_BR} -lt 30 ]; do
+    if [ -d /sys/class/net/br-lan ] && \
+       ip link show br-lan 2>/dev/null | grep -q 'state UP'; then
+        BRLAN_UP=1
+        break
+    fi
+    sleep 1
+    WAIT_BR=$((WAIT_BR + 1))
+done
+
+# Start babeld on br-lan via its init script (so it inherits the UCI config
+# and the pid file is properly managed). Prefer babeld, fall back to bmx7.
+# MESH_UP requires BOTH the daemon process AND the UDP listener to be
+# present; either alone is not enough to declare the mesh up.
+MESH_UP=0
+if [ ${BRLAN_UP} -eq 1 ] && ([ -x /etc/init.d/babeld ] || [ -x /usr/sbin/babeld ] || which babeld >/dev/null 2>&1); then
+    if [ -x /etc/init.d/babeld ]; then
+        /etc/init.d/babeld enable 2>/dev/null
+        /etc/init.d/babeld restart >/tmp/babeld-start.log 2>&1 || true
+    else
+        # Init script missing — start babeld directly (matches the form used
+        # by configure-vms.sh:start_mesh_daemon_on_vm).
+        killall babeld 2>/dev/null || true
+        babeld -D -I /var/run/babeld.pid br-lan >/tmp/babeld-start.log 2>&1 &
+    fi
+    # Give babeld a moment to bind its UDP socket.
+    sleep 2
+    if pgrep -x babeld >/dev/null 2>&1 && \
+       (netstat -ulnp 2>/dev/null || ss -ulnp 2>/dev/null) | grep -q babeld; then
+        MESH_UP=1
+    fi
+fi
+if [ ${MESH_UP} -eq 0 ] && [ ${BRLAN_UP} -eq 1 ] && ([ -x /usr/sbin/bmx7 ] || which bmx7 >/dev/null 2>&1); then
+    if [ -x /etc/init.d/bmx7 ]; then
+        /etc/init.d/bmx7 enable 2>/dev/null
+        /etc/init.d/bmx7 restart >/tmp/bmx7-start.log 2>&1 || true
+    else
+        killall bmx7 2>/dev/null || true
+        bmx7 dev=br-lan >/tmp/bmx7.log 2>&1 &
+    fi
+    sleep 2
+    if pgrep -x bmx7 >/dev/null 2>&1; then
+        MESH_UP=1
+    fi
+fi
+
+# Ensure dropbear is running. The first-boot dropbear enable is also done
+# by configure-source-image.sh (S19dropbear), but this is a safety net in
+# case the symlink was overwritten by lime-config.
+/etc/init.d/dropbear enable 2>/dev/null || true
+/etc/init.d/dropbear start 2>/dev/null || true
+
+# Only mark as configured when br-lan is UP AND the mesh daemon is verified
+# listening. A failed first boot leaves the marker unset so the next boot
+# retries the full reconfiguration.
+if [ ${BRLAN_UP} -eq 1 ] && [ ${MESH_UP} -eq 1 ]; then
+    touch "${MARKER}"
+fi
+
+exit 0
+RCLOCALEOF
+sudo chmod +x "${MOUNT_POINT}/etc/rc.local"
+log "  rc.local: atomic network rewrite + babeld init restart (idempotent, retryable)"
+
 # ─── Ensure /sbin/service shim is present (needed by mesha adapters) ──────────
 # OpenWrt doesn't ship a SysV-style `service` command; mesha adapters and some
 # testbed helpers shell out to `service <name> <action>`. Inject a minimal
